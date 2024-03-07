@@ -1,0 +1,9 @@
+cradle:
+  cabal:
+    components:
+    - path: "./src"
+      component: "lib:dens-contract-tests"
+    - path: "./app"
+      component: "exe:dens-contract-tests"
+    - path: "./test"
+      component: "test:dens-contract-tests-test"
