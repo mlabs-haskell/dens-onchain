@@ -25,94 +25,37 @@ import Onchain.Types (
   DensKey (..),
   Protocol (..),
   RecordDatum (..),
-  SetDatum (..),
-  SetInsert (..),
  )
-
--- import LambdaBuffers.Plutus.V1.Plutarch (Bytes)
--- import LambdaBuffers.Prelude.Plutarch qualified as Lb.Plutarch
--- import LambdaBuffers.Runtime.Plutarch (PList (PList))
-import Plutarch (Config (Config), Term, TracingMode (DoTracingAndBinds))
-import Plutarch qualified as P
+import Plutarch.Api.V1 (PCurrencySymbol (..), PTokenName (..))
+import Plutarch.Api.V1.Value (pvalueOf)
+import Plutarch.Api.V2 (
+  PScriptContext,
+ )
+import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
+import Plutarch.Crypto (pblake2b_256)
+import Plutarch.List (pany, pelem)
 import Plutarch.Monadic qualified as P
 import Plutarch.Prelude (
   ClosedTerm,
-  PAsData,
-  PBool (..),
-  PBuiltinList,
-  PBuiltinPair,
-  PData,
   PEq ((#==)),
-  PInteger,
-  PIsData,
-  PMaybe (PJust, PNothing),
-  POpaque,
-  PPair,
-  PPartialOrd ((#<)),
-  PString,
-  PTryFrom,
   PUnit (..),
-  S,
-  Term,
   pcon,
-  pconstant,
-  pdata,
-  pdcons,
-  pdnil,
   pfield,
-  pfilter,
-  pfind,
-  pfoldr,
   pfromData,
-  pfstBuiltin,
   phoistAcyclic,
-  pif,
   plam,
-  plength,
   plet,
   pletFields,
   pmap,
   pmatch,
-  psndBuiltin,
-  ptraceError,
-  ptryFrom,
   (#),
   (#$),
-  (#&&),
   (:-->),
  )
-import Plutarch.Script qualified
-
-import Plutarch.Api.V1 (AmountGuarantees (NonZero), KeyGuarantees (Sorted), PCredential (..), PCurrencySymbol (..), PTokenName (..))
-import Plutarch.Api.V1.Maybe (PMaybeData (PDNothing))
-import Plutarch.Api.V1.Scripts (PScriptHash (..))
-import Plutarch.Api.V1.Value (passertPositive, pforgetPositive, pnormalize, pvalueOf)
-import Plutarch.Api.V2 (
-  PAddress (..),
-  PCurrencySymbol (..),
-  PDatum (PDatum),
-  PMap (..),
-  PMaybeData (PDNothing),
-  POutputDatum (POutputDatum),
-  PPubKeyHash (..),
-  PScriptContext,
-  PScriptHash (..),
-  PScriptPurpose (..),
-  PTokenName (..),
-  PTxInInfo (..),
-  PTxOut (..),
-  PValue (..),
- )
-import Plutarch.Api.V2.Tx (POutputDatum (POutputDatum), PTxInInfo)
-import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
-import Plutarch.Crypto (pblake2b_256)
-import Plutarch.List (PListLike (..), pall, pany, pconvertLists, pelem, pfoldl)
 
 import Onchain.Utils (
-  emptyTN,
   findUnique,
   hasCS,
-  mintsExactly,
   paysTo,
   pguardM,
   pscriptHashAddress,
@@ -121,7 +64,6 @@ import Onchain.Utils (
   txOutDatum,
   txOutValue,
  )
-import Plutarch.Maybe (pfromJust)
 
 {-
 data RecordDatum = RecordDatum

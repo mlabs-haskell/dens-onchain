@@ -22,7 +22,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 
-module Onchain.SetElem (mkSetValidator) where
+module Onchain.SetElem (mkSetValidator, mkSetElemMintingPolicy, densNameMin', densNameMax') where
 
 import Onchain.Types (
   DensKey (..),
@@ -34,39 +34,22 @@ import Onchain.Types (
 -- import LambdaBuffers.Plutus.V1.Plutarch (Bytes)
 -- import LambdaBuffers.Prelude.Plutarch qualified as Lb.Plutarch
 -- import LambdaBuffers.Runtime.Plutarch (PList (PList))
-import Plutarch (Config (Config), Term, TracingMode (DoTracingAndBinds))
-import Plutarch qualified as P
+import Plutarch (Term)
 import Plutarch.Monadic qualified as P
 import Plutarch.Prelude (
   ClosedTerm,
-  PAsData,
   PBool (..),
   PBuiltinList,
-  PBuiltinPair,
   PByteString,
-  PData,
   PEq ((#==)),
-  PInteger,
-  PIsData,
-  PMaybe (PJust, PNothing),
-  PPair,
+  PMaybe (PNothing),
   PPartialOrd ((#<)),
-  PString,
-  PTryFrom,
   PUnit (..),
-  S,
-  Term,
   pcon,
   pconstant,
-  pdata,
-  pdcons,
-  pdnil,
   pfield,
   pfilter,
-  pfind,
-  pfoldr,
   pfromData,
-  pfstBuiltin,
   phoistAcyclic,
   pif,
   plam,
@@ -75,48 +58,35 @@ import Plutarch.Prelude (
   pletFields,
   pmap,
   pmatch,
-  psndBuiltin,
-  ptraceError,
-  ptryFrom,
   (#),
   (#$),
   (#&&),
   (:-->),
  )
-import Plutarch.Script qualified
 
-import Plutarch.Api.V1 (AmountGuarantees (NonZero), KeyGuarantees (Sorted), PCredential (..), PCurrencySymbol (..), PTokenName (..))
-import Plutarch.Api.V1.Maybe (PMaybeData (PDNothing))
-import Plutarch.Api.V1.Scripts (PScriptHash (..))
-import Plutarch.Api.V1.Value (passertPositive, pforgetPositive, pnormalize, pvalueOf)
+import Plutarch.Api.V1 (PCurrencySymbol (..), PTokenName (..))
+import Plutarch.Api.V1.Value (passertPositive, pforgetPositive, pvalueOf)
 import Plutarch.Api.V2 (
-  PAddress (..),
-  PCurrencySymbol (..),
-  PDatum (PDatum),
-  PMap (..),
-  PMaybeData (PDNothing),
-  POutputDatum (POutputDatum),
   PScriptContext,
-  PScriptHash (..),
-  PTokenName (..),
-  PTxInInfo (..),
   PTxOut (..),
-  PValue (..),
  )
-import Plutarch.Api.V2.Tx (POutputDatum (POutputDatum), PTxInInfo)
 import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
 import Plutarch.Crypto (pblake2b_256)
-import Plutarch.List (PListLike (..), pall, pconvertLists, pfoldl)
+import Plutarch.List (PListLike (..), pall)
 
 import Onchain.Utils
 import Plutarch.Maybe (pfromJust)
 
 densNameMin :: ClosedTerm PByteString
-densNameMin = pconstant ""
+densNameMin = pconstant densNameMin'
+
+densNameMin' = ""
 
 -- placeholder
 densNameMax :: ClosedTerm PByteString
-densNameMax = pconstant "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+densNameMax = pconstant densNameMax'
+
+densNameMax' = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 -- ignores the currency symbol for the extension for now
 isInitialSetDatum :: ClosedTerm (SetDatum :--> PBool)
