@@ -35,14 +35,13 @@ import Onchain.Types (
 -- import LambdaBuffers.Prelude.Plutarch qualified as Lb.Plutarch
 -- import LambdaBuffers.Runtime.Plutarch (PList (PList))
 import Plutarch (Term)
-import Plutarch.Monadic qualified as P
 import Plutarch.Prelude (
   ClosedTerm,
   PBool (..),
   PBuiltinList,
   PByteString,
   PEq ((#==)),
-  PMaybe (PNothing),
+  PMaybe (..),
   PPartialOrd ((#<)),
   PUnit (..),
   pcon,
@@ -54,10 +53,7 @@ import Plutarch.Prelude (
   pif,
   plam,
   plength,
-  plet,
-  pletFields,
   pmap,
-  pmatch,
   (#),
   (#$),
   (#&&),
@@ -65,7 +61,7 @@ import Plutarch.Prelude (
  )
 
 import Plutarch.Api.V1 (PCurrencySymbol (..), PTokenName (..))
-import Plutarch.Api.V1.Value (passertPositive, pforgetPositive, pvalueOf)
+import Plutarch.Api.V1.Value (pvalueOf)
 import Plutarch.Api.V2 (
   PScriptContext,
   PTxOut (..),
@@ -74,30 +70,58 @@ import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
 import Plutarch.Crypto (pblake2b_256)
 import Plutarch.List (PListLike (..), pall)
 
-import Onchain.Utils
+import Plutarch.TermCont
+
+import Onchain.Utils (
+  emptyTN,
+  extractDatum,
+  extractDatumSuchThat,
+  findOutWithCS,
+  findUnique,
+  hasCS,
+  hasLR,
+  lacksCS,
+  mintsExactly,
+  pguardC,
+  pletC,
+  pletFieldsC,
+  pmatchC,
+  pownCurrencySymbol,
+  pscriptHashAddress,
+  ptraceC,
+  resolved,
+  scriptHashToCS,
+  totalMint,
+  txOutDatum,
+  valLacksCS,
+ )
 import Plutarch.Maybe (pfromJust)
+
+import Data.ByteString
 
 densNameMin :: ClosedTerm PByteString
 densNameMin = pconstant densNameMin'
 
+densNameMin' :: ByteString
 densNameMin' = ""
 
 -- placeholder
 densNameMax :: ClosedTerm PByteString
 densNameMax = pconstant densNameMax'
 
-densNameMax' = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+densNameMax' :: ByteString
+densNameMax' = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 
 -- ignores the currency symbol for the extension for now
 isInitialSetDatum :: ClosedTerm (SetDatum :--> PBool)
-isInitialSetDatum = phoistAcyclic $ plam $ \setDatum -> P.do
-  SetDatum l r _ <- pmatch setDatum
-  DensKey lname lclass <- pmatch . pfromData $ l
-  DensKey rname rclass <- pmatch . pfromData $ r
-  leftIsMin <- plet $ pfromData lname #== densNameMin
-  rightIsMax <- plet $ pfromData rname #== densNameMax
-  classesMatch <- plet $ lclass #== rclass
-  leftIsMin #&& rightIsMax #&& classesMatch
+isInitialSetDatum = phoistAcyclic $ plam $ \setDatum -> unTermCont $ do
+  SetDatum l r _ <- pmatchC setDatum
+  DensKey lname lclass <- pmatchC . pfromData $ l
+  DensKey rname rclass <- pmatchC . pfromData $ r
+  leftIsMin <- pletC $ pfromData lname #== densNameMin
+  rightIsMax <- pletC $ pfromData rname #== densNameMax
+  classesMatch <- pletC $ lclass #== rclass
+  pure $ leftIsMin #&& rightIsMax #&& classesMatch
 
 mkSetValidator ::
   Term
@@ -108,33 +132,34 @@ mkSetValidator ::
         :--> PScriptContext
         :--> PUnit
     )
-mkSetValidator = phoistAcyclic $ plam $ \protocolCS _ setInsert cxt -> P.do
+mkSetValidator = phoistAcyclic $ plam $ \protocolCS _ _ cxt -> unTermCont $ do
   -- We only need to check whether the setElem token is minted, all the real validation logic is in that MP
-  txInfo <- plet $ pfield @"txInfo" # cxt
+  txInfo <- pletC $ pfield @"txInfo" # cxt
 
-  fields <- pletFields @'["referenceInputs", "outputs", "mint"] txInfo
+  fields <- pletFieldsC @'["referenceInputs", "outputs", "mint"] txInfo
 
-  resolvedOutputs <- plet $ pfromData fields.outputs
+  resolvedOutputs <- pletC $ pfromData fields.outputs
 
-  resolvedRefInputs <- plet $ pmap # resolved # pfromData fields.referenceInputs
+  resolvedRefInputs <- pletC $ pmap # resolved # pfromData fields.referenceInputs
 
   -- NOTE/FIXME/TODO: I am NOT 100% sure that this is safe, but I do not know another way to get the setElemID
   --                  Someone needs to carefully review. It *seems* safe if the protocol NFT MP is a one shot policy
-  Protocol elemIdMP setElemMP _ _ <- pmatch $ P.do
-    inInputs <- pmatch $ findOutWithCS # protocolCS # resolvedOutputs
-    case inInputs of
+  Protocol _ setElemMP _ _ <- pmatchC . unTermCont $ do
+    inOutputs <- pmatchC $ findOutWithCS # protocolCS # resolvedOutputs
+    case inOutputs of
       PNothing ->
-        txOutDatum @Protocol
-          #$ pfromJust
-          #$ findOutWithCS
-          # protocolCS
-          # resolvedRefInputs
+        pure $
+          txOutDatum @Protocol
+            #$ pfromJust
+            #$ findOutWithCS
+            # protocolCS
+            # resolvedRefInputs
+      PJust outRef -> pure $ txOutDatum @Protocol # outRef
 
-  setElemIdCS <- plet $ scriptHashToCS # pfromData setElemMP
+  setElemIdCS <- pletC $ scriptHashToCS # pfromData setElemMP
 
-  pguardM "SetElemID token minted" $ (pvalueOf # fields.mint # setElemIdCS # emptyTN) #== 1
-
-  pcon PUnit
+  pguardC "SetElemID token minted" ((pvalueOf # fields.mint # setElemIdCS # emptyTN) #== 1)
+  pure $ pcon PUnit
 
 mkSetElemMintingPolicy ::
   Term
@@ -144,113 +169,124 @@ mkSetElemMintingPolicy ::
         :--> PScriptContext
         :--> PUnit
     )
-mkSetElemMintingPolicy = phoistAcyclic $ plam $ \protocolSymb setInsert cxt -> P.do
-  SetInsert'Insert keyToInsert <- pmatch setInsert
+mkSetElemMintingPolicy = phoistAcyclic $ plam $ \protocolSymb setInsert cxt -> unTermCont $ do
+  ptraceC "setElemA"
+  SetInsert'Insert keyToInsert <- pmatchC setInsert
+  ptraceC "setElemB"
+  txInfo <- pletC $ pfield @"txInfo" # cxt
+  ptraceC "setElemC"
+  fields <- pletFieldsC @'["inputs", "referenceInputs", "outputs", "mint"] txInfo
+  ptraceC "setElemD"
+  setElemCS <- pletC $ pownCurrencySymbol # cxt
+  ptraceC "setElemE"
+  outputs <- pletC $ pfromData fields.outputs
+  ptraceC "setElemF"
+  mint <- pletC $ pfromData fields.mint
+  ptraceC "setElemG"
+  isInitalization <- pletC $ initialSetDatumInOutputs # setElemCS # outputs
+  ptraceC "setElemH"
+  result <-
+    pletC $
+      pif
+        isInitalization
+        ( unTermCont $ do
+            -- Checks for an initialize transaction. We already know a SetDatum w/ the initialization properties is in an output w/ a SetElem NFT
 
-  txInfo <- plet $ pfield @"txInfo" # cxt
+            -- Is the protocol NFT minted in this TX? NOTE: Protocol MP must be one shot!
+            pguardC "Protocol NFT Minted" (pvalueOf # mint # protocolSymb # emptyTN #== 1)
 
-  fields <- pletFields @'["inputs", "referenceInputs", "outputs", "mint"] txInfo
+            -- Is there a protocol datum in the output that contains the protocol NFT? (also we need the fields here)
+            Protocol elemIdMP setElemMP _ _ <- pmatchC $ findProtocolInOutputs # protocolSymb # outputs
 
-  setElemCS <- plet $ pownCurrencySymbol # cxt
+            -- Probably redundant, but it can't hurt to make sure that this minting policy is the one indicated in the Protocol datum
+            pguardC "Own CS doesn't match protocol SetElem CS" $ (scriptHashToCS # pfromData setElemMP) #== setElemCS
 
-  outputs <- plet $ pfromData fields.outputs
+            -- Are no element id tokens minted? (We check the output and mints for redundancy, maybe not necessary)
+            elemIdCS <- pletC $ scriptHashToCS # pfromData elemIdMP
+            noElemIDInOutputs <- pletC $ pall # (lacksCS # elemIdCS) # outputs
+            noElemIDInMint <- pletC $ valLacksCS # elemIdCS # mint
+            pguardC "No ElemID NFT minted or in output" $ noElemIDInMint #&& noElemIDInOutputs
 
-  mint <- plet $ passertPositive #$ pfromData fields.mint
+            pure $ pcon PUnit
+        )
+        ( unTermCont $ do
+            ptraceC "setElemI"
+            -- 0) REFERENCE INPUTS: Get the protocol datum (reference input, paid to protocol validator)
 
-  isInitalization <- plet $ initialSetDatumInOutputs # setElemCS # outputs
+            Protocol elemIdMP _ setValidator _ <-
+              pmatchC $
+                txOutDatum @(Protocol)
+                  #$ findUnique
+                  # (hasCS # protocolSymb)
+                  #$ pmap
+                  # resolved
+                  # fields.referenceInputs
+            ptraceC "setElemJ"
+            -- 1) INPUTS: Check for k < densKey < nxt input that pays to the set validator & holds a setDatum
+            resolvedInputs <- pletC $ pmap # resolved # pfromData fields.inputs
+            ptraceC "setElemK"
+            setValidatorAddress <- pletC $ pscriptHashAddress # setValidator
+            ptraceC "setElemL"
+            setDatum <- pletC $ extractDatum @SetDatum # setValidatorAddress # setElemCS #$ resolvedInputs -- ignoring OwnerApproval for now
+            ptraceC "setElemM"
+            SetDatum l r _ <- pmatchC setDatum
+            pguardC "Validate set insert" $ validateSetInsert # setDatum # pfromData keyToInsert
 
-  pif
-    isInitalization
-    P.do
-      -- Checks for an initialize transaction. We already know a SetDatum w/ the initialization properties is in an output w/ a SetElem NFT
+            -- 2) OUTPUTS: Check for a. SD(k, densKey) b. SD(densKey,nxt)
 
-      -- Is the protocol NFT minted in this TX? NOTE: Protocol MP must be one shot!
-      pguardM "Protocol NFT Minted" $ pvalueOf # mint # protocolSymb # emptyTN #== 1
+            l' <- pletC $ pfromData l
+            r' <- pletC $ pfromData r
+            k <- pletC $ pfromData keyToInsert
+            checkOutput <- pletC $ plam $ \p -> extractDatumSuchThat @SetDatum # p # setValidatorAddress # setElemCS # outputs
+            SetDatum {} <- pmatchC $ checkOutput # (hasLR # l' # k)
+            SetDatum {} <- pmatchC $ checkOutput # (hasLR # k # r')
 
-      -- Is there a protocol datum in the output that contains the protocol NFT? (also we need the fields here)
-      Protocol elemIdMP setElemMP setValidator _ <- pmatch $ findProtocolInOutputs # protocolSymb # outputs
+            -- 3) MINTS: Check for the presence of a SetElemID NFT & ElementID NFT
 
-      -- Probably redundant, but it can't hurt to make sure that this minting policy is the one indicated in the Protocol datum
-      pguardM "Own CS doesn't match protocol SetElem CS" $ (scriptHashToCS # pfromData setElemMP) #== setElemCS
+            -- This, plus the two subsequent checks, implies that *only* the SetElem and ElemID tokens are minted
+            pguardC "Only two CS minted " $ totalMint # mint #== 2
 
-      -- Are no element id tokens minted? (We check the output and mints for redundancy, maybe not necessary)
-      elemIdCS <- plet $ scriptHashToCS # pfromData elemIdMP
-      noElemIDInOutputs <- plet $ pall # (lacksCS # elemIdCS) # outputs
-      noElemIDInMint <- plet $ valLacksCS # elemIdCS # mint
-      pguardM "No ElemID NFT minted or in output" $ noElemIDInMint #&& noElemIDInOutputs
+            checkMintsOne <- pletC $ plam $ \currSym tokName -> mintsExactly # 1 # currSym # tokName # mint
 
-      pcon PUnit
-    P.do
-      -- 0) REFERENCE INPUTS: Get the protocol datum (reference input, paid to protocol validator)
+            pguardC "Mints one SetElemID token" $ checkMintsOne # setElemCS # emptyTN
 
-      Protocol elemIdMP setElemMP setValidator _ <-
-        pmatch $
-          txOutDatum @Protocol
-            #$ findUnique
-            # (hasCS # protocolSymb)
-            #$ pmap
-            # resolved
-            # fields.referenceInputs
+            elemIdCS <- pletC $ scriptHashToCS # pfromData elemIdMP
+            kTokName <- pletC $ pcon $ PTokenName (pblake2b_256 #$ pserialiseData # pdataImpl k)
+            pguardC "Mints one ElementID NFT with a token name == blake2b_256(densKey)" $ checkMintsOne # elemIdCS # kTokName
 
-      -- 1) INPUTS: Check for k < densKey < nxt input that pays to the set validator & holds a
-      resolvedInputs <- plet $ pmap # resolved # pfromData fields.inputs
-
-      setValidatorAddress <- plet $ pscriptHashAddress # setValidator
-      setDatum <- plet $ extractDatum @SetDatum # setValidatorAddress # setElemCS #$ resolvedInputs -- ignoring OwnerApproval for now
-      SetDatum l r _ <- pmatch setDatum
-      pguardM "Validate set insert" $ validateSetInsert # setDatum # pfromData keyToInsert
-
-      -- 2) OUTPUTS: Check for a. SD(k, densKey) b. SD(densKey,nxt)
-
-      l' <- plet $ pfromData l
-      r' <- plet $ pfromData r
-      k <- plet $ pfromData keyToInsert
-      checkOutput <- plet $ plam $ \p -> extractDatumSuchThat @SetDatum # p # setValidatorAddress # setElemCS # outputs
-      SetDatum {} <- pmatch $ checkOutput # (hasLR # l' # k)
-      SetDatum {} <- pmatch $ checkOutput # (hasLR # k # r')
-
-      -- 3) MINTS: Check for the presence of a SetElemID NFT & ElementID NFT
-
-      -- This, plus the two subsequent checks, implies that *only* the SetElem and ElemID tokens are minted
-      pguardM "Only two CS minted " $ totalMint # pforgetPositive mint #== 2
-
-      checkMintsOne <- plet $ plam $ \currSym tokName -> mintsExactly # 1 # currSym # tokName # mint
-
-      pguardM "Mints one SetElemID token" $ checkMintsOne # setElemCS # emptyTN
-
-      elemIdCS <- plet $ scriptHashToCS # pfromData elemIdMP
-      kTokName <- plet $ pcon $ PTokenName (pblake2b_256 #$ pserialiseData # pdataImpl k)
-      pguardM "Mints one ElementID NFT with a token name == blake2b_256(densKey)" $ checkMintsOne # elemIdCS # kTokName
-
-      pcon PUnit
+            pure $ pcon PUnit
+        )
+  pure result
   where
-    -- TODO: plet these funs with the correct arguments pre-applied. These bindings
+    -- TODO: pletC these funs with the correct arguments pre-applied. These bindings
     --       are a temporary thing to improve code readability until I'm sure the logic is solid
 
     -- If it's an initialization tx, there should be *one* SetDatum in the outputs, and that set datum should match
     -- the schema for an initialization datum
     initialSetDatumInOutputs :: ClosedTerm (PCurrencySymbol :--> PBuiltinList PTxOut :--> PBool)
-    initialSetDatumInOutputs = phoistAcyclic $ plam $ \setElemCS outputs -> P.do
-      withSetElemCS <- plet $ pfilter # (hasCS # setElemCS) # outputs
-      pif
-        (plength # withSetElemCS #== 1)
-        (isInitialSetDatum #$ txOutDatum #$ phead # withSetElemCS)
-        (pcon PFalse)
+    initialSetDatumInOutputs = phoistAcyclic $ plam $ \setElemCS outputs -> unTermCont $ do
+      withSetElemCS <- pletC $ pfilter # (hasCS # setElemCS) # outputs
+      ptraceC "HERE!"
+      pure $
+        pif
+          (plength # withSetElemCS #== 1)
+          (isInitialSetDatum #$ txOutDatum #$ phead # withSetElemCS)
+          (pcon PFalse)
 
     -- The protocol MP should be a one shot, and a set initialization tx should mint it
     findProtocolInOutputs :: ClosedTerm (PCurrencySymbol :--> PBuiltinList PTxOut :--> Protocol)
-    findProtocolInOutputs = phoistAcyclic $ plam $ \protocolCS outputs -> P.do
-      withProtocolCS <- plet $ pfilter # (hasCS # protocolCS) # outputs
-      pguardM "Exactly 1 output with a Protocol CS" $ plength # withProtocolCS #== 1
-      txOutDatum # (phead # withProtocolCS)
+    findProtocolInOutputs = phoistAcyclic $ plam $ \protocolCS outputs -> unTermCont $ do
+      withProtocolCS <- pletC $ pfilter # (hasCS # protocolCS) # outputs
+      pguardC "Exactly 1 output with a Protocol CS" $ plength # withProtocolCS #== 1
+      pure $ txOutDatum # (phead # withProtocolCS)
 
     validateSetInsert :: ClosedTerm (SetDatum :--> DensKey :--> PBool)
-    validateSetInsert = phoistAcyclic $ plam $ \setDatum toInsert -> P.do
-      SetDatum l r _ <- pmatch setDatum
-      DensKey lName lClass <- pmatch $ pfromData l
-      DensKey rName rClass <- pmatch $ pfromData r
-      DensKey xName xClass <- pmatch toInsert
-      pguardM "All keys have same class" (lClass #== rClass #&& lClass #== xClass)
-      pguardM "l < x" (pfromData lName #< pfromData xName)
-      pguardM "x < r" (pfromData xName #< pfromData rName)
-      pcon PTrue
+    validateSetInsert = phoistAcyclic $ plam $ \setDatum toInsert -> unTermCont $ do
+      SetDatum l r _ <- pmatchC setDatum
+      DensKey lName lClass <- pmatchC $ pfromData l
+      DensKey rName rClass <- pmatchC $ pfromData r
+      DensKey xName xClass <- pmatchC toInsert
+      pguardC "All keys have same class" (lClass #== rClass #&& lClass #== xClass)
+      pguardC "l < x" (pfromData lName #< pfromData xName)
+      pguardC "x < r" (pfromData xName #< pfromData rName)
+      pure $ pcon PTrue

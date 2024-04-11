@@ -23,40 +23,85 @@ module Onchain.Types (
   RecordDatum (..),
   SetDatum (..),
   SetInsert (..),
+  PMaybe (..),
+  ptryFromData,
 ) where
 
--- import qualified LambdaBuffers.Plutus.V1.Plutarch
--- import qualified LambdaBuffers.Plutus.V2.Plutarch
--- import qualified LambdaBuffers.Prelude.Plutarch
-import qualified Data.Functor.Const
 import qualified GHC.Generics
+import Plutarch.Internal (Term, pdelay, pforce)
 
--- import qualified LambdaBuffers.Runtime.Plutarch
--- import qualified LambdaBuffers.Runtime.Plutarch.LamVal
-
-import Data.Functor.Const (Const)
 import qualified Plutarch
-import Plutarch.Api.V2
-import qualified Plutarch.Bool
-import Plutarch.Builtin
-import qualified Plutarch.Internal.PlutusType
-import Plutarch.Prelude hiding (PJust, PMaybe, PNothing)
-import qualified Plutarch.Prelude hiding (PJust, PMaybe, PNothing)
-import Plutarch.Reducible (Reduce)
-import qualified Plutarch.Show
-import Plutarch.TryFrom (PTryFrom (..))
-import qualified Plutarch.Unsafe
+import Plutarch.Api.V2 (
+  PCurrencySymbol,
+  PMaybeData,
+  PPubKeyHash,
+  PScriptHash,
+ )
+import Plutarch.Builtin (
+  PAsData,
+  PBuiltinList (..),
+  PData,
+  PIsData,
+  pdata,
+  pforgetData,
+  pfromData,
+ )
+import Plutarch.Internal.PlutusType (
+  PlutusType (pcon', pmatch'),
+  pcon,
+  pmatch,
+ )
+import Plutarch.Prelude (
+  PByteString,
+  PEq,
+  PInteger,
+  PMaybe (..),
+  PTryFrom,
+  PlutusType (..),
+  ptraceError,
+  ptryFrom,
+ )
+
+ptryFromData :: forall x s. (PTryFrom PData (PAsData x), PIsData x) => Term s PData -> Term s x
+ptryFromData t = pfromData $ ptryFrom @(PAsData x) t fst
 
 data DensKey (s :: Plutarch.S)
   = DensKey
       (Plutarch.Term s (PAsData PByteString))
       (Plutarch.Term s (PAsData PInteger))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+  deriving anyclass (PEq)
 
-newtype DensValue (s :: Plutarch.S) = DensValue (Plutarch.Term s (PAsData (PMaybe PByteString)))
+instance PlutusType DensKey where
+  type PInner DensKey = PBuiltinList PData
+  pcon' (DensKey t1 t2) = pcon $ PCons (pforgetData t1) $ pcon $ PCons (pforgetData t2) $ pcon PNil
+  pmatch' xs f = pforce $ pmatch xs \case
+    PCons bs rest -> pmatch rest \case
+      PCons i _ -> pdelay $ f $ DensKey (ptryFrom bs fst) (ptryFrom i fst)
+      _ -> pdelay $ ptraceError "PMatch DensKey Fail"
+    _ -> pdelay $ ptraceError "PMatch DensKey Fail"
+
+instance PIsData DensKey
+instance PTryFrom PData (PAsData DensKey)
+
+newtype DensValue (s :: Plutarch.S) = DensValue (Plutarch.Term s (PAsData (PMaybeData (PAsData PByteString))))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+  deriving anyclass (PEq)
+instance PIsData DensValue
+instance PTryFrom PData (PAsData DensValue)
+
+instance PlutusType DensValue where
+  type PInner DensValue = PBuiltinList PData
+  pcon' (DensValue mbs) = pcon $ PCons (pforgetData mbs) $ pcon PNil
+  pmatch' xs f = pforce $ pmatch xs $ \case
+    PCons md _ -> pdelay $ f $ DensValue (pdata $ ptryFrom md fst)
+    _ -> pdelay $ ptraceError "PMatch DensValue fail"
+
+pbfromList :: [Term s PData] -> Term s (PBuiltinList PData)
+pbfromList = foldr go (pcon PNil)
+  where
+    go :: Term s PData -> Term s (PBuiltinList PData) -> Term s (PBuiltinList PData)
+    go x xs = pcon $ PCons x xs
 
 data Protocol (s :: Plutarch.S)
   = Protocol
@@ -65,7 +110,29 @@ data Protocol (s :: Plutarch.S)
       (Plutarch.Term s (PAsData PScriptHash))
       (Plutarch.Term s (PAsData PScriptHash))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+
+instance PIsData Protocol
+instance PTryFrom PData (PAsData Protocol)
+
+instance PlutusType Protocol where
+  type PInner Protocol = PBuiltinList PData
+  pcon' (Protocol a b c d) = pbfromList $ pforgetData <$> [a, b, c, d]
+  pmatch' xs f = pforce $ pmatch xs \case
+    PCons a rest -> pmatch rest \case
+      PCons b rest' -> pmatch rest' \case
+        PCons c rest'' -> pmatch rest'' \case
+          PCons d _ ->
+            pdelay $
+              f $
+                Protocol
+                  (ptryFrom a fst)
+                  (ptryFrom b fst)
+                  (ptryFrom c fst)
+                  (ptryFrom d fst)
+          _ -> pdelay $ ptraceError "Pmatch Protocol fail"
+        _ -> pdelay $ ptraceError "Pmatch Protocol fail"
+      _ -> pdelay $ ptraceError "Pmatch Protocol fail"
+    _ -> pdelay $ ptraceError "Pmatch Protocol fail"
 
 data RecordDatum (s :: Plutarch.S)
   = RecordDatum
@@ -74,7 +141,36 @@ data RecordDatum (s :: Plutarch.S)
       (Plutarch.Term s (PAsData DensValue))
       (Plutarch.Term s (PAsData PPubKeyHash))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+  deriving anyclass (PEq)
+
+instance PIsData RecordDatum
+instance PTryFrom PData (PAsData RecordDatum)
+
+cons :: Term s (PAsData x) -> Term s (PBuiltinList PData) -> Term s (PBuiltinList PData)
+cons x xs = pcon $ PCons (pforgetData x) xs
+
+nil :: Term s (PBuiltinList PData)
+nil = pcon PNil
+
+instance PlutusType RecordDatum where
+  type PInner RecordDatum = PBuiltinList PData
+  pcon' (RecordDatum a b c d) = cons a $ cons b $ cons c $ cons d nil
+  pmatch' xs f = pforce $ pmatch xs $ \case
+    PCons a rest -> pmatch rest \case
+      PCons b rest' -> pmatch rest' \case
+        PCons c rest'' -> pmatch rest'' \case
+          PCons d _ ->
+            pdelay $
+              f $
+                RecordDatum
+                  (ptryFrom a fst)
+                  (ptryFrom b fst)
+                  (ptryFrom c fst) -- TODO write tryfrom instance
+                  (ptryFrom d fst)
+          _ -> pdelay $ ptraceError "Pmatch RecordDatum fail"
+        _ -> pdelay $ ptraceError "Pmatch RecordDatum fail"
+      _ -> pdelay $ ptraceError "Pmatch RecordDatum fail"
+    _ -> pdelay $ ptraceError "Pmatch RecordDatum fail"
 
 data SetDatum (s :: Plutarch.S)
   = SetDatum
@@ -82,821 +178,36 @@ data SetDatum (s :: Plutarch.S)
       (Plutarch.Term s (PAsData DensKey))
       (Plutarch.Term s (PAsData PCurrencySymbol))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+
+instance PIsData SetDatum
+instance PTryFrom PData (PAsData SetDatum)
+
+instance PlutusType SetDatum where
+  type PInner SetDatum = PBuiltinList PData
+  pcon' (SetDatum a b c) = cons a $ cons b $ cons c nil
+  pmatch' xs f = pforce $ pmatch xs $ \case
+    PCons a rest -> pmatch rest $ \case
+      PCons b rest' -> pmatch rest' $ \case
+        PCons c _ ->
+          pdelay $
+            f $
+              SetDatum
+                (ptryFrom a fst) -- TODO write tryfrom instance
+                (ptryFrom b fst) -- TODO write tryfrom instance
+                (ptryFrom c fst) -- TODO write tryfrom instance
+        _ -> pdelay $ ptraceError "Pmatch SetDatum fail"
+      _ -> pdelay $ ptraceError "Pmatch SetDatum fail"
+    _ -> pdelay $ ptraceError "Pmatch SetDatum fail"
 
 data SetInsert (s :: Plutarch.S) = SetInsert'Insert (Plutarch.Term s (PAsData DensKey))
   deriving stock (GHC.Generics.Generic)
-  deriving anyclass (Plutarch.Show.PShow)
+  deriving anyclass (PIsData, PEq)
 
-instance Plutarch.Bool.PEq Protocol where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
+instance PTryFrom PData (PAsData SetInsert)
 
-instance Plutarch.Builtin.PIsData Protocol where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType Protocol where
-  type PInner Protocol = Plutarch.Builtin.PData
-  pcon' =
-    ( \x0 ->
-        let Protocol x1 x2 x3 x4 = x0
-         in listData
-              ( [ toPlutusData (x1)
-                , toPlutusData (x2)
-                , toPlutusData (x3)
-                , toPlutusData (x4)
-                ]
-              )
-    )
-  pmatch' =
-    ( \pd f ->
-        ((#))
-          ( plam
-              ( \x0 ->
-                  (#)
-                    ( (#)
-                        ( (#)
-                            ( (#)
-                                ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                ( plam
-                                    ( \x3 ->
-                                        pmatch
-                                          x3
-                                          ( \x4 -> case x4 of
-                                              PNil -> pfailParse
-                                              PCons x5 x6 ->
-                                                pmatch
-                                                  x6
-                                                  ( \x7 -> case x7 of
-                                                      PNil -> pfailParse
-                                                      PCons x8 x9 ->
-                                                        pmatch
-                                                          x9
-                                                          ( \x10 -> case x10 of
-                                                              PNil -> pfailParse
-                                                              PCons x11 x12 ->
-                                                                pmatch
-                                                                  x12
-                                                                  ( \x13 -> case x13 of
-                                                                      PNil -> pfailParse
-                                                                      PCons x14 x15 ->
-                                                                        pmatch
-                                                                          x15
-                                                                          ( \x16 -> case x16 of
-                                                                              PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x5))) (plam (\x19 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x8))) (plam (\x20 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x11))) (plam (\x21 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x14))) (plam (\x22 -> (#) (psucceedParse) (f (Protocol (x19) (x20) (x21) (x22)))))))))))
-                                                                              PCons x17 x18 -> pfailParse
-                                                                          )
-                                                                  )
-                                                          )
-                                                  )
-                                          )
-                                    )
-                                )
-                            )
-                            (plam (\x23 -> pfailParse))
-                        )
-                        (plam (\x24 -> pfailParse))
-                    )
-                    (x0)
-              )
-          )
-          pd
-    )
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData Protocol where
-  type PTryFromExcess Plutarch.Builtin.PData Protocol = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData Protocol) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData Protocol) = Data.Functor.Const.Const ()
-  ptryFrom' =
-    ( \pd f ->
-        f
-          ( ((#))
-              ( plam
-                  ( \x0 ->
-                      (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                    ( plam
-                                        ( \x3 ->
-                                            pmatch
-                                              x3
-                                              ( \x4 -> case x4 of
-                                                  PNil -> pfailParse
-                                                  PCons x5 x6 ->
-                                                    pmatch
-                                                      x6
-                                                      ( \x7 -> case x7 of
-                                                          PNil -> pfailParse
-                                                          PCons x8 x9 ->
-                                                            pmatch
-                                                              x9
-                                                              ( \x10 -> case x10 of
-                                                                  PNil -> pfailParse
-                                                                  PCons x11 x12 ->
-                                                                    pmatch
-                                                                      x12
-                                                                      ( \x13 -> case x13 of
-                                                                          PNil -> pfailParse
-                                                                          PCons x14 x15 ->
-                                                                            pmatch
-                                                                              x15
-                                                                              ( \x16 -> case x16 of
-                                                                                  PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x5))) (plam (\x19 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x8))) (plam (\x20 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x11))) (plam (\x21 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x14))) (plam (\x22 -> (#) (psucceedParse) (pdata . pcon $ (Protocol (x19) (x20) (x21) (x22)))))))))))
-                                                                                  PCons x17 x18 -> pfailParse
-                                                                              )
-                                                                      )
-                                                              )
-                                                      )
-                                              )
-                                        )
-                                    )
-                                )
-                                (plam (\x23 -> pfailParse))
-                            )
-                            (plam (\x24 -> pfailParse))
-                        )
-                        (x0)
-                  )
-              )
-              pd
-          , ()
-          )
-    )
-
-instance Plutarch.Bool.PEq DensKey where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
-
-instance Plutarch.Builtin.PIsData DensKey where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType DensKey where
-  type PInner DensKey = Plutarch.Builtin.PData
-  pcon' =
-    ( \x0 ->
-        let DensKey x1 x2 = x0
-         in listData
-              ( [ toPlutusData (x1)
-                , toPlutusData (x2)
-                ]
-              )
-    )
-  pmatch' =
-    ( \pd f ->
-        ((#))
-          ( plam
-              ( \x0 ->
-                  (#)
-                    ( (#)
-                        ( (#)
-                            ( (#)
-                                ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                ( plam
-                                    ( \x3 ->
-                                        pmatch
-                                          x3
-                                          ( \x4 -> case x4 of
-                                              PNil -> pfailParse
-                                              PCons x5 x6 ->
-                                                pmatch
-                                                  x6
-                                                  ( \x7 -> case x7 of
-                                                      PNil -> pfailParse
-                                                      PCons x8 x9 ->
-                                                        pmatch
-                                                          x9
-                                                          ( \x10 -> case x10 of
-                                                              PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x5))) (plam (\x13 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x8))) (plam (\x14 -> (#) (psucceedParse) (f (DensKey (x13) (x14)))))))
-                                                              PCons x11 x12 -> pfailParse
-                                                          )
-                                                  )
-                                          )
-                                    )
-                                )
-                            )
-                            (plam (\x15 -> pfailParse))
-                        )
-                        (plam (\x16 -> pfailParse))
-                    )
-                    (x0)
-              )
-          )
-          pd
-    )
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData DensKey where
-  type PTryFromExcess Plutarch.Builtin.PData DensKey = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData DensKey) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData DensKey) = Data.Functor.Const.Const ()
-  ptryFrom' =
-    ( \pd f ->
-        f
-          ( ((#))
-              ( plam
-                  ( \x0 ->
-                      (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                    ( plam
-                                        ( \x3 ->
-                                            pmatch
-                                              x3
-                                              ( \x4 -> case x4 of
-                                                  PNil -> pfailParse
-                                                  PCons x5 x6 ->
-                                                    pmatch
-                                                      x6
-                                                      ( \x7 -> case x7 of
-                                                          PNil -> pfailParse
-                                                          PCons x8 x9 ->
-                                                            pmatch
-                                                              x9
-                                                              ( \x10 -> case x10 of
-                                                                  PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x5))) (plam (\x13 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x8))) (plam (\x14 -> (#) (psucceedParse) (pdata . pcon $ (DensKey (x13) (x14)))))))
-                                                                  PCons x11 x12 -> pfailParse
-                                                              )
-                                                      )
-                                              )
-                                        )
-                                    )
-                                )
-                                (plam (\x15 -> pfailParse))
-                            )
-                            (plam (\x16 -> pfailParse))
-                        )
-                        (x0)
-                  )
-              )
-              pd
-          , ()
-          )
-    )
-
-instance Plutarch.Bool.PEq DensValue where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
-
-instance Plutarch.Builtin.PIsData DensValue where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType DensValue where
-  type PInner DensValue = Plutarch.Builtin.PData
-  pcon' = (\x0 -> let DensValue x1 = x0 in toPlutusData (x1))
-  pmatch' = (\pd f -> ((#)) (plam (\x0 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x0))) (plam (\x1 -> (#) (psucceedParse) (f (DensValue (x1))))))) pd)
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData DensValue where
-  type PTryFromExcess Plutarch.Builtin.PData DensValue = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData DensValue) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData DensValue) = Data.Functor.Const.Const ()
-  ptryFrom' = (\pd f -> f (((#)) (plam (\x0 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x0))) (plam (\x1 -> (#) (psucceedParse) (pdata . pcon $ (DensValue (x1))))))) pd, ()))
-
-instance Plutarch.Bool.PEq SetDatum where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
-
-instance Plutarch.Builtin.PIsData SetDatum where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType SetDatum where
-  type PInner SetDatum = Plutarch.Builtin.PData
-  pcon' =
-    ( \x0 ->
-        let SetDatum x1 x2 x3 = x0
-         in listData
-              ( [ toPlutusData (x1)
-                , toPlutusData (x2)
-                , toPlutusData (x3)
-                ]
-              )
-    )
-  pmatch' =
-    ( \pd f ->
-        ((#))
-          ( plam
-              ( \x0 ->
-                  (#)
-                    ( (#)
-                        ( (#)
-                            ( (#)
-                                ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                ( plam
-                                    ( \x3 ->
-                                        pmatch
-                                          x3
-                                          ( \x4 -> case x4 of
-                                              PNil -> pfailParse
-                                              PCons x5 x6 ->
-                                                pmatch
-                                                  x6
-                                                  ( \x7 -> case x7 of
-                                                      PNil -> pfailParse
-                                                      PCons x8 x9 ->
-                                                        pmatch
-                                                          x9
-                                                          ( \x10 -> case x10 of
-                                                              PNil -> pfailParse
-                                                              PCons x11 x12 ->
-                                                                pmatch
-                                                                  x12
-                                                                  ( \x13 -> case x13 of
-                                                                      PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x5))) (plam (\x16 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x8))) (plam (\x17 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x11))) (plam (\x18 -> (#) (psucceedParse) (f (SetDatum (x16) (x17) (x18)))))))))
-                                                                      PCons x14 x15 -> pfailParse
-                                                                  )
-                                                          )
-                                                  )
-                                          )
-                                    )
-                                )
-                            )
-                            (plam (\x19 -> pfailParse))
-                        )
-                        (plam (\x20 -> pfailParse))
-                    )
-                    (x0)
-              )
-          )
-          pd
-    )
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData SetDatum where
-  type PTryFromExcess Plutarch.Builtin.PData SetDatum = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData SetDatum) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData SetDatum) = Data.Functor.Const.Const ()
-  ptryFrom' =
-    ( \pd f ->
-        f
-          ( ((#))
-              ( plam
-                  ( \x0 ->
-                      (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                    ( plam
-                                        ( \x3 ->
-                                            pmatch
-                                              x3
-                                              ( \x4 -> case x4 of
-                                                  PNil -> pfailParse
-                                                  PCons x5 x6 ->
-                                                    pmatch
-                                                      x6
-                                                      ( \x7 -> case x7 of
-                                                          PNil -> pfailParse
-                                                          PCons x8 x9 ->
-                                                            pmatch
-                                                              x9
-                                                              ( \x10 -> case x10 of
-                                                                  PNil -> pfailParse
-                                                                  PCons x11 x12 ->
-                                                                    pmatch
-                                                                      x12
-                                                                      ( \x13 -> case x13 of
-                                                                          PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x5))) (plam (\x16 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x8))) (plam (\x17 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x11))) (plam (\x18 -> (#) (psucceedParse) (pdata . pcon $ (SetDatum (x16) (x17) (x18)))))))))
-                                                                          PCons x14 x15 -> pfailParse
-                                                                      )
-                                                              )
-                                                      )
-                                              )
-                                        )
-                                    )
-                                )
-                                (plam (\x19 -> pfailParse))
-                            )
-                            (plam (\x20 -> pfailParse))
-                        )
-                        (x0)
-                  )
-              )
-              pd
-          , ()
-          )
-    )
-
-instance Plutarch.Bool.PEq SetInsert where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
-
-instance Plutarch.Builtin.PIsData SetInsert where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType SetInsert where
-  type PInner SetInsert = Plutarch.Builtin.PData
-  pcon' =
-    ( \x0 -> case x0 of
-        SetInsert'Insert x1 -> constrData (0) ([toPlutusData (x1)])
-    )
-  pmatch' =
-    ( \pd f ->
-        ((#))
-          ( plam
-              ( \x0 ->
-                  (#)
-                    ( (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    (pcasePlutusData)
-                                    ( plam
-                                        ( \x1 ->
-                                            plam
-                                              ( \x2 ->
-                                                  pif
-                                                    ((#==) (x1) (pconstant 0))
-                                                    ( pmatch
-                                                        x2
-                                                        ( \x3 -> case x3 of
-                                                            PNil -> pfailParse
-                                                            PCons x4 x5 ->
-                                                              pmatch
-                                                                x5
-                                                                ( \x6 -> case x6 of
-                                                                    PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x4))) (plam (\x9 -> (#) (psucceedParse) (f (SetInsert'Insert (x9)))))
-                                                                    PCons x7 x8 -> pfailParse
-                                                                )
-                                                        )
-                                                    )
-                                                    (pfailParse)
-                                              )
-                                        )
-                                    )
-                                )
-                                (plam (\x10 -> pfailParse))
-                            )
-                            (plam (\x11 -> pfailParse))
-                        )
-                        (plam (\x12 -> pfailParse))
-                    )
-                    (x0)
-              )
-          )
-          pd
-    )
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData SetInsert where
-  type PTryFromExcess Plutarch.Builtin.PData SetInsert = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData SetInsert) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData SetInsert) = Data.Functor.Const.Const ()
-  ptryFrom' =
-    ( \pd f ->
-        f
-          ( ((#))
-              ( plam
-                  ( \x0 ->
-                      (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    ( (#)
-                                        (pcasePlutusData)
-                                        ( plam
-                                            ( \x1 ->
-                                                plam
-                                                  ( \x2 ->
-                                                      pif
-                                                        ((#==) (x1) (pconstant 0))
-                                                        ( pmatch
-                                                            x2
-                                                            ( \x3 -> case x3 of
-                                                                PNil -> pfailParse
-                                                                PCons x4 x5 ->
-                                                                  pmatch
-                                                                    x5
-                                                                    ( \x6 -> case x6 of
-                                                                        PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x4))) (plam (\x9 -> (#) (psucceedParse) (pdata . pcon $ (SetInsert'Insert (x9)))))
-                                                                        PCons x7 x8 -> pfailParse
-                                                                    )
-                                                            )
-                                                        )
-                                                        (pfailParse)
-                                                  )
-                                            )
-                                        )
-                                    )
-                                    (plam (\x10 -> pfailParse))
-                                )
-                                (plam (\x11 -> pfailParse))
-                            )
-                            (plam (\x12 -> pfailParse))
-                        )
-                        (x0)
-                  )
-              )
-              pd
-          , ()
-          )
-    )
-
-instance Plutarch.Bool.PEq RecordDatum where
-  (#==) = \l r -> ((Plutarch.Bool.#==)) (Plutarch.Builtin.pdata l) (Plutarch.Builtin.pdata r)
-
-instance Plutarch.Builtin.PIsData RecordDatum where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
-
-instance Plutarch.Internal.PlutusType.PlutusType RecordDatum where
-  type PInner RecordDatum = Plutarch.Builtin.PData
-  pcon' =
-    ( \x0 ->
-        let RecordDatum x1 x2 x3 x4 = x0
-         in listData
-              ( [ toPlutusData (x1)
-                , toPlutusData (x2)
-                , toPlutusData (x3)
-                , toPlutusData (x4)
-                ]
-              )
-    )
-  pmatch' =
-    ( \pd f ->
-        ((#))
-          ( plam
-              ( \x0 ->
-                  (#)
-                    ( (#)
-                        ( (#)
-                            ( (#)
-                                ((#) (pcasePlutusData) (plam (\x1 -> plam (\x2 -> pfailParse))))
-                                ( plam
-                                    ( \x3 ->
-                                        pmatch
-                                          x3
-                                          ( \x4 -> case x4 of
-                                              PNil -> pfailParse
-                                              PCons x5 x6 ->
-                                                pmatch
-                                                  x6
-                                                  ( \x7 -> case x7 of
-                                                      PNil -> pfailParse
-                                                      PCons x8 x9 ->
-                                                        pmatch
-                                                          x9
-                                                          ( \x10 -> case x10 of
-                                                              PNil -> pfailParse
-                                                              PCons x11 x12 ->
-                                                                pmatch
-                                                                  x12
-                                                                  ( \x13 -> case x13 of
-                                                                      PNil -> pfailParse
-                                                                      PCons x14 x15 ->
-                                                                        pmatch
-                                                                          x15
-                                                                          ( \x16 -> case x16 of
-                                                                              PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x5))) (plam (\x19 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x8))) (plam (\x20 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x11))) (plam (\x21 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPlutusType) (x14))) (plam (\x22 -> (#) (psucceedParse) (f (RecordDatum (x19) (x20) (x21) (x22)))))))))))
-                                                                              PCons x17 x18 -> pfailParse
-                                                                          )
-                                                                  )
-                                                          )
-                                                  )
-                                          )
-                                    )
-                                )
-                            )
-                            (plam (\x23 -> pfailParse))
-                        )
-                        (plam (\x24 -> pfailParse))
-                    )
-                    (x0)
-              )
-          )
-          pd
-    )
-
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData RecordDatum where
-  type PTryFromExcess Plutarch.Builtin.PData RecordDatum = Data.Functor.Const.Const ()
-  ptryFrom' = ptryFromPAsData
-instance Plutarch.TryFrom.PTryFrom Plutarch.Builtin.PData (PAsData RecordDatum) where
-  type PTryFromExcess Plutarch.Builtin.PData (PAsData RecordDatum) = Data.Functor.Const.Const ()
-  ptryFrom' =
-    ( \pd f ->
-        f
-          ( ((#))
-              ( plam
-                  ( \x0 ->
-                      (#)
-                        ( (#)
-                            ( (#)
-                                ( (#)
-                                    ( (#)
-                                        (pcasePlutusData)
-                                        ( plam
-                                            ( \x1 ->
-                                                plam
-                                                  (\x2 -> pfailParse)
-                                            )
-                                        )
-                                    )
-                                    ( plam
-                                        ( \x3 ->
-                                            pmatch
-                                              x3
-                                              ( \x4 -> case x4 of
-                                                  PNil -> pfailParse
-                                                  PCons x5 x6 ->
-                                                    pmatch
-                                                      x6
-                                                      ( \x7 -> case x7 of
-                                                          PNil -> pfailParse
-                                                          PCons x8 x9 ->
-                                                            pmatch
-                                                              x9
-                                                              ( \x10 -> case x10 of
-                                                                  PNil -> pfailParse
-                                                                  PCons x11 x12 ->
-                                                                    pmatch
-                                                                      x12
-                                                                      ( \x13 -> case x13 of
-                                                                          PNil -> pfailParse
-                                                                          PCons x14 x15 ->
-                                                                            pmatch
-                                                                              x15
-                                                                              ( \x16 -> case x16 of
-                                                                                  PNil -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x5))) (plam (\x19 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x8))) (plam (\x20 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x11))) (plam (\x21 -> (#) ((#) (pbindParse) ((#) (pfromPlutusDataPTryFrom) (x14))) (plam (\x22 -> (#) (psucceedParse) (pdata . pcon $ (RecordDatum (x19) (x20) (x21) (x22)))))))))))
-                                                                                  PCons x17 x18 -> pfailParse
-                                                                              )
-                                                                      )
-                                                              )
-                                                      )
-                                              )
-                                        )
-                                    )
-                                )
-                                (plam (\x23 -> pfailParse))
-                            )
-                            (plam (\x24 -> pfailParse))
-                        )
-                        (x0)
-                  )
-              )
-              pd
-          , ()
-          )
-    )
-ptryFromPAsData :: forall a s r. (PTryFrom PData (PAsData a), PIsData a) => Term s PData -> ((Term s a, Reduce (PTryFromExcess PData (PAsData a) s)) -> Term s r) -> Term s r
-ptryFromPAsData (pd :: Term s PData) f = ptryFrom @(PAsData a) pd (\(x, exc) -> f (pfromData x, exc))
-
--- | Plutarch `toPlutusData :: a -> PlutusData`
-ptoPlutusData :: ClosedTerm (PAsData a :--> PData)
-ptoPlutusData = plam toPlutusData
-
--- | Haskell `toPlutusData :: a -> PlutusData`
-toPlutusData :: Term s (PAsData a) -> Term s PData
-toPlutusData = pforgetData
-
--- | Plutarch PlutusType `fromPlutusData :: PlutusData -> Parser a`
-pfromPlutusDataPlutusType :: ClosedTerm (PData :--> PAsData a)
-pfromPlutusDataPlutusType = plam Plutarch.Unsafe.punsafeCoerce
-
--- | Plutarch PTryFrom `fromPlutusData :: PlutusData -> Parser a`
-pfromPlutusDataPTryFrom :: (PTryFrom PData (PAsData a)) => ClosedTerm (PData :--> PAsData a)
-pfromPlutusDataPTryFrom = phoistAcyclic $ plam ptryFromData
-  where
-    ptryFromData :: forall a s. (PTryFrom PData (PAsData a)) => Term s PData -> Term s (PAsData a)
-    ptryFromData pd = ptryFrom @(PAsData a) pd fst
-
--- | Plutarch `constrData :: IntE -> ListE PlutusData -> PlutusData`
-pconstrData :: ClosedTerm (PInteger :--> PBuiltinList PData :--> PData)
-pconstrData = phoistAcyclic $ plam $ \ix args -> pforgetData $ pconstrBuiltin # ix # args
-
--- | Haskell `constrData :: IntE -> ListE PlutusData -> PlutusData`
-constrData :: Term s PInteger -> [Term s PData] -> Term s PData
-constrData ix args = pforgetData $ pconstrBuiltin # ix # toBuiltinList args
-
--- | Plutarch `integerData :: IntE -> PlutusData`
-pintegerData :: ClosedTerm (PInteger :--> PData)
-pintegerData = phoistAcyclic $ plam $ \i -> ptoPlutusData # pdata i
-
--- | Haskell `integerData :: IntE -> PlutusData`
-integerData :: Term s PInteger -> Term s PData
-integerData = toPlutusData . pdata
-
--- | Plutarch `listData :: ListE PlutusData -> PlutusData`
-plistData :: ClosedTerm (PBuiltinList PData :--> PData)
-plistData = phoistAcyclic $ plam $ pforgetData . pdata
-
--- | Haskell `listData :: ListE PlutusData -> PlutusData`
-listData :: [Term s PData] -> Term s PData
-listData = pforgetData . pdata . toBuiltinList
-
-toBuiltinList :: [Term s PData] -> Term s (PBuiltinList PData)
-toBuiltinList [] = pcon PNil
-toBuiltinList (x : xs) = pcon (PCons x (toBuiltinList xs))
-
--- | Plutarch `casePlutusData :: (Int -> [PlutusData] -> a) -> ([PlutusData] -> a) -> (Int -> a) -> (PlutusData -> a) -> PlutusData -> a`
-pcasePlutusData ::
-  ClosedTerm ((PInteger :--> PBuiltinList PData :--> a) :--> (PBuiltinList PData :--> a) :--> (PInteger :--> a) :--> (PData :--> a) :--> PData :--> a)
-pcasePlutusData = phoistAcyclic $ plam $ \handleConstr handleList handleInt handleOther pd ->
-  pforce $
-    pchooseData
-      # pd
-      # pdelay (plet (pasConstr # pd) $ \pair -> handleConstr # (pfstBuiltin # pair) # (psndBuiltin # pair))
-      # pdelay (ptrace "Got a PlutusData Map" (handleOther # pd))
-      # pdelay (handleList # (pasList # pd))
-      # pdelay (handleInt # (pasInt # pd))
-      # pdelay (ptrace "Got PlutusData Bytes" (handleOther # pd))
-
--- | Haskell `casePlutusData :: (Int -> [PlutusData] -> a) -> ([PlutusData] -> a) -> (Int -> a) -> (PlutusData -> a) -> PlutusData -> a`
-casePlutusData ::
-  (Term s PInteger -> Term s (PBuiltinList PData) -> Term s a) ->
-  (Term s (PBuiltinList PData) -> Term s a) ->
-  (Term s PInteger -> Term s a) ->
-  (Term s PData -> Term s a) ->
-  Term s PData ->
-  Term s a
-casePlutusData handleConstr handleList handleInt handleOther pd = pcasePlutusData # plam handleConstr # plam handleList # plam handleInt # plam handleOther # pd
-
--- | Plutarch `succeedParse :: a -> Parser a`
-psucceedParse :: ClosedTerm (a :--> a)
-psucceedParse = plam id
-
--- | Plutarch `failParse :: Parser a`
-pfailParse :: ClosedTerm a
-pfailParse = perror
-
--- | Plutarch `bindParse :: Parser a -> (a -> Parser b) -> Parser b`
-pbindParse :: ClosedTerm (a :--> (a :--> b) :--> b)
-pbindParse = phoistAcyclic $ plam (flip (#))
-
--- | PMaybe messed up in Plutarch so redefining here.
-data PMaybe (a :: PType) (s :: S)
-  = PJust (Term s (PAsData a))
-  | PNothing
-  deriving stock (Generic)
-  deriving anyclass (PShow)
-
-instance PlutusType (PMaybe a) where
-  type PInner (PMaybe a) = PData
-  pcon' (PJust x) = constrData 0 [toPlutusData x]
-  pcon' PNothing = constrData 1 []
-  pmatch' pd f =
-    casePlutusData
-      ( \ix args ->
-          pif
-            (ix #== 0)
-            ( pmatch args \case
-                PNil -> perror
-                PCons h t -> pif (t #== (pcon PNil)) (f $ PJust (pfromPlutusDataPlutusType # h)) perror
-            )
-            ( pif
-                (ix #== 1)
-                ( pmatch args \case
-                    PNil -> f PNothing
-                    PCons _h _t -> perror
-                )
-                perror
-            )
-      )
-      (const perror)
-      (const perror)
-      (const perror)
-      pd
-
-instance (PTryFrom PData (PAsData a)) => PTryFrom PData (PMaybe a) where
-  type PTryFromExcess PData (PMaybe a) = Const ()
-  ptryFrom' = ptryFromPAsData
-
-instance (PTryFrom PData (PAsData a)) => PTryFrom PData (PAsData (PMaybe a)) where
-  type PTryFromExcess PData (PAsData (PMaybe a)) = Const ()
-  ptryFrom' pd f =
-    f
-      ( casePlutusData
-          ( \ix args ->
-              pif
-                (ix #== 0)
-                ( pmatch args \case
-                    PNil -> perror
-                    PCons h t ->
-                      pif
-                        (t #== pcon PNil)
-                        (pdata . pcon $ PJust (pfromPlutusDataPTryFrom # h))
-                        perror
-                )
-                ( pif
-                    (ix #== 1)
-                    ( pmatch args \case
-                        PNil -> pdata . pcon $ PNothing
-                        PCons _h _t -> perror
-                    )
-                    perror
-                )
-          )
-          (const perror)
-          (const perror)
-          (const perror)
-          pd
-      , ()
-      )
-
-instance PIsData (PMaybe a) where
-  pdataImpl = Plutarch.Unsafe.punsafeCoerce
-  pfromDataImpl = Plutarch.Unsafe.punsafeCoerce
+instance PlutusType SetInsert where
+  type PInner SetInsert = PBuiltinList PData
+  pcon' (SetInsert'Insert a) = cons a nil
+  pmatch' xs f = pforce $ pmatch xs $ \case
+    PCons a _ -> pdelay $ f $ SetInsert'Insert (ptryFrom a fst)
+    _ -> pdelay $ ptraceError "Pmatch SetInsert fail"

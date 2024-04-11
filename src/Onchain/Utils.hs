@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
@@ -15,6 +16,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE QualifiedDo #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -28,17 +30,16 @@ module Onchain.Utils where
 
 import Onchain.Types (
   DensKey (..),
-  Protocol (..),
   SetDatum (..),
-  SetInsert (..),
+  ptryFromData,
  )
 
 -- import LambdaBuffers.Plutus.V1.Plutarch (Bytes)
 -- import LambdaBuffers.Prelude.Plutarch qualified as Lb.Plutarch
 -- import LambdaBuffers.Runtime.Plutarch (PList (PList))
-import Plutarch (Config (Config), Term, TracingMode (DoTracingAndBinds))
-import Plutarch qualified as P
-import Plutarch.Monadic qualified as P
+
+import Plutarch (PlutusType, Term)
+
 import Plutarch.Prelude (
   ClosedTerm,
   PAsData,
@@ -49,69 +50,54 @@ import Plutarch.Prelude (
   PEq ((#==)),
   PInteger,
   PIsData,
-  PMaybe (PJust, PNothing),
-  PPair,
-  PPartialOrd ((#<)),
+  PMaybe (..),
   PString,
   PTryFrom,
-  PType,
-  PUnit (..),
-  S,
-  Term,
   pcon,
   pconstant,
   pdata,
   pdcons,
   pdnil,
-  pfield,
   pfilter,
   pfind,
-  pfoldr,
   pfromData,
-  pfstBuiltin,
   phoistAcyclic,
   pif,
   plam,
   plength,
   plet,
-  pletFields,
   pmap,
   pmatch,
   psndBuiltin,
+  ptrace,
   ptraceError,
-  ptryFrom,
   (#),
   (#$),
   (#&&),
   (:-->),
  )
-import Plutarch.Script qualified
 
-import Plutarch.Api.V1 (AmountGuarantees (NonZero), KeyGuarantees (Sorted), PCredential (..), PCurrencySymbol (..), PTokenName (..))
+import Plutarch.Api.V1 (KeyGuarantees (Sorted), PCredential (..), PCurrencySymbol (..), PTokenName (..))
 import Plutarch.Api.V1.AssocMap (plookup)
 import Plutarch.Api.V1.Maybe (PMaybeData (PDNothing))
 import Plutarch.Api.V1.Scripts (PScriptHash (..))
-import Plutarch.Api.V1.Value (pnormalize, pvalueOf)
+import Plutarch.Api.V1.Value (pforgetPositive, pvalueOf)
 import Plutarch.Api.V2 (
   AmountGuarantees (..),
   PAddress (..),
-  PCurrencySymbol (..),
   PDatum (PDatum),
   PMap (..),
-  PMaybeData (PDNothing),
   POutputDatum (POutputDatum),
   PScriptContext,
-  PScriptHash (..),
-  PTokenName (..),
   PTxInInfo (..),
   PTxOut (..),
   PValue (..),
  )
 import Plutarch.Api.V2.Contexts (PScriptPurpose (PMinting))
-import Plutarch.Api.V2.Tx (POutputDatum (POutputDatum), PTxInInfo)
-import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
-import Plutarch.Crypto (pblake2b_256)
 import Plutarch.List (PList, PListLike (..), pconvertLists, pfoldl)
+
+import Plutarch.DataRepr.Internal.Field
+import Plutarch.TermCont
 
 {-
     UTILITIES (TODO: Break out into separate module)
@@ -119,9 +105,33 @@ import Plutarch.List (PList, PListLike (..), pconvertLists, pfoldl)
 
 -- stupid plutarch stuff
 
--- traceIfFalse for P.do
-pguardM :: Term s PString -> Term s PBool -> Term s a -> Term s a
-pguardM msg cond x = pif cond x $ ptraceError msg
+-- traceIfFalse for unTermCont $ do
+-- pguardM :: Term s PString -> Term s PBool ->  Term s PBool
+
+-- pguardM :: Term s PString -> Term s PBool -> Term s b  -> Term s b
+
+pletC :: Term s a -> TermCont s (Term s a)
+pletC = tcont . plet
+
+pguardC :: Term s PString -> Term s PBool -> TermCont s ()
+pguardC s cond = tcont $ \f -> pif cond (f ()) $ ptraceError s
+
+ptraceC :: Term s PString -> TermCont s ()
+ptraceC s = tcont $ \f -> ptrace s (f ())
+
+pletFieldsC ::
+  forall fs a s b ps bs.
+  ( PDataFields a
+  , ps ~ PFields a
+  , bs ~ Bindings ps fs
+  , BindFields ps bs
+  ) =>
+  Term s a ->
+  TermCont @b s (HRec (BoundTerms ps bs s))
+pletFieldsC x = tcont $ pletFields @fs x
+
+pmatchC :: PlutusType a => Term s a -> TermCont s (a s)
+pmatchC = tcont . pmatch
 
 -- empty token name constant
 emptyTN :: Term s PTokenName
@@ -131,19 +141,19 @@ mintsExactly :: ClosedTerm (PInteger :--> PCurrencySymbol :--> PTokenName :--> P
 mintsExactly = phoistAcyclic $ plam $ \i cs tn val -> (pvalueOf # val # cs # tn) #== i
 
 scriptHashToCS :: Term s (PScriptHash :--> PCurrencySymbol)
-scriptHashToCS = phoistAcyclic $ plam $ \shash -> P.do
-  PScriptHash bs <- pmatch shash
-  pcon (PCurrencySymbol bs)
+scriptHashToCS = phoistAcyclic $ plam $ \shash -> unTermCont $ do
+  PScriptHash bs <- pmatchC shash
+  pure $ pcon (PCurrencySymbol bs)
 
 {- Gets the total quantity of all minted tokens in a value.
    This is needed for a "doesn't mint anything else" check,
    which is strictly necessary to conform with the specification.
 -}
-totalMint :: ClosedTerm (PValue 'Sorted 'NonZero :--> PInteger)
-totalMint = phoistAcyclic $ plam $ \val -> P.do
-  PValue innerV <- pmatch val
-  PMap innerM1 <- pmatch innerV
-  pfoldl # go # 0 # innerM1
+totalMint :: ClosedTerm (PValue 'Sorted 'NoGuarantees :--> PInteger)
+totalMint = phoistAcyclic $ plam $ \val -> unTermCont $ do
+  PValue innerV <- pmatchC val
+  PMap innerM1 <- pmatchC innerV
+  pure $ pfoldl # go # 0 # innerM1
   where
     go ::
       ClosedTerm
@@ -151,13 +161,13 @@ totalMint = phoistAcyclic $ plam $ \val -> P.do
             :--> PBuiltinPair (PAsData PCurrencySymbol) (PAsData (PMap 'Sorted PTokenName PInteger))
             :--> PInteger
         )
-    go = phoistAcyclic $ plam $ \acc bipair -> P.do
-      PMap innerM2 <- pmatch . pfromData $ psndBuiltin # bipair
-      recList <- plet $ plam $ \inneracc innerpair -> P.do
-        q <- plet $ pfromData $ psndBuiltin # innerpair
-        inneracc + q
-      x <- plet $ pfoldl # recList # 0 # innerM2
-      acc + x
+    go = phoistAcyclic $ plam $ \acc bipair -> unTermCont $ do
+      PMap innerM2 <- pmatchC . pfromData $ psndBuiltin # bipair
+      recList <- pletC $ plam $ \inneracc innerpair -> unTermCont $ do
+        q <- pletC $ pfromData $ psndBuiltin # innerpair
+        pure $ inneracc + q
+      x <- pletC $ pfoldl # recList # 0 # innerM2
+      pure $ acc + x
 
 {- -go :: ClosedTerm (
   PList (PPair PCurrencySymbol (PPair PTokenName PInteger))
@@ -173,14 +183,14 @@ pscriptHashAddress = plam $ \datahash ->
 
 -- SetDatum predicate builder
 hasLR :: Term s (DensKey :--> DensKey :--> SetDatum :--> PBool)
-hasLR = phoistAcyclic $ plam $ \l r setDatum -> P.do
-  SetDatum l' r' _ <- pmatch setDatum
-  (l #== pfromData l') #&& (r #== pfromData r')
+hasLR = phoistAcyclic $ plam $ \l r setDatum -> unTermCont $ do
+  SetDatum l' r' _ <- pmatchC setDatum
+  pure $ (l #== pfromData l') #&& (r #== pfromData r')
 
 resolved :: ClosedTerm (PTxInInfo :--> PTxOut)
-resolved = phoistAcyclic $ plam $ \out -> P.do
-  PTxInInfo inRec <- pmatch out
-  pfield @"resolved" # inRec
+resolved = phoistAcyclic $ plam $ \out -> unTermCont $ do
+  PTxInInfo inRec <- pmatchC out
+  pure $ pfield @"resolved" # inRec
 
 {- Finds a datum in a list of TxOuts where:
    - The TxOut pays to the supplied address
@@ -196,7 +206,7 @@ resolved = phoistAcyclic $ plam $ \out -> P.do
 -}
 extractDatumSuchThat ::
   forall t.
-  (PIsData t, PTryFrom PData t) =>
+  (PTryFrom PData (PAsData t), PIsData t) =>
   ClosedTerm
     ( (t :--> PBool)
         :--> PAddress -- output addr
@@ -204,60 +214,61 @@ extractDatumSuchThat ::
         :--> PBuiltinList PTxOut
         :--> t
     )
-extractDatumSuchThat = phoistAcyclic $ plam $ \pred addr cs outs' -> P.do
-  outs <- plet $ pconvertLists @PBuiltinList @PList @PTxOut @_ # outs' -- missing PLift for SetDatum if we don't convert. Maybe write instance?
-  xs <- plet (pfilter # (matchAddrCS # addr # cs) # outs)
-  x <- pmatch $ pfind # pred #$ pmap # txOutDatum # xs
+extractDatumSuchThat = phoistAcyclic $ plam $ \p addr cs outs' -> unTermCont $ do
+  outs <- pletC $ pconvertLists @PBuiltinList @PList @PTxOut @_ # outs' -- missing PLift for SetDatum if we don't convert. Maybe write instance?
+  xs <- pletC (pfilter # (matchAddrCS # addr # cs) # outs)
+  x <- pmatchC $ pfind # p #$ pmap # plam (\x -> txOutDatum # x) # xs
   case x of
-    PJust datum -> datum
-    PNothing -> ptraceError "Could not find tx out with supplied addr/cs/setdatum pred" -- todo: better error!
+    PJust datum -> pure datum
+    PNothing -> pure $ ptraceError "Could not find tx out with supplied addr/cs/setdatum pred" -- todo: better error!
 
 matchAddrCS :: ClosedTerm (PAddress :--> PCurrencySymbol :--> PTxOut :--> PBool)
-matchAddrCS = plam $ \addr cs txout -> P.do
-  PTxOut outRec <- pmatch txout
-  outFields <- pletFields @'["address", "value", "datum"] outRec
-  addrsMatch <- plet $ outFields.address #== addr
-  hasNFT <- plet $ (pvalueOf # outFields.value # cs # emptyTN) #== 1
-  addrsMatch #&& hasNFT
+matchAddrCS = plam $ \addr cs txout -> unTermCont $ do
+  PTxOut outRec <- pmatchC txout
+  outFields <- pletFieldsC @'["address", "value", "datum"] outRec
+  addrsMatch <- pletC $ outFields.address #== addr
+  hasNFT <- pletC $ (pvalueOf # outFields.value # cs # emptyTN) #== 1
+  pure $ addrsMatch #&& hasNFT
 
 txOutValue :: ClosedTerm (PTxOut :--> PValue 'Sorted 'Positive)
-txOutValue = phoistAcyclic $ plam $ \txOut -> P.do
-  PTxOut outRec <- pmatch txOut
-  pfield @"value" # outRec
+txOutValue = phoistAcyclic $ plam $ \txOut -> unTermCont $ do
+  PTxOut outRec <- pmatchC txOut
+  pure $ pfield @"value" # outRec
 
 hasCS :: ClosedTerm (PCurrencySymbol :--> PTxOut :--> PBool)
-hasCS = phoistAcyclic $ plam $ \cs out -> P.do
-  PTxOut outRec <- pmatch out
-  val <- plet $ pfield @"value" # outRec
-  pvalueOf
-    # (pfield @"value" # outRec)
-    # cs
-    # emptyTN
-    #== 1
+hasCS = phoistAcyclic $ plam $ \cs out -> unTermCont $ do
+  PTxOut outRec <- pmatchC out
+  val <- pletC $ pfield @"value" # outRec
+  pure $
+    pvalueOf
+      # val
+      # cs
+      # emptyTN
+      #== 1
 
 valHasCS :: ClosedTerm (PCurrencySymbol :--> PValue 'Sorted 'Positive :--> PBool)
-valHasCS = phoistAcyclic $ plam $ \cs val -> P.do
-  PValue valInner <- pmatch val
-  res <- pmatch $ plookup # cs # valInner
+valHasCS = phoistAcyclic $ plam $ \cs val -> unTermCont $ do
+  PValue valInner <- pmatchC val
+  res <- pmatchC $ plookup # cs # valInner
   case res of
-    PJust _ -> pcon PTrue
-    PNothing -> pcon PFalse
+    PJust _ -> pure $ pcon PTrue
+    PNothing -> pure $ pcon PFalse
 
 lacksCS :: ClosedTerm (PCurrencySymbol :--> PTxOut :--> PBool)
-lacksCS = phoistAcyclic $ plam $ \cs out -> P.do
-  PTxOut outRec <- pmatch out
-  valLacksCS # cs #$ pfield @"value" # outRec
+lacksCS = phoistAcyclic $ plam $ \cs out -> unTermCont $ do
+  PTxOut outRec <- pmatchC out
+  pure $ valLacksCS # cs #$ pforgetPositive (pfield @"value" # outRec)
 
-valLacksCS :: ClosedTerm (PCurrencySymbol :--> PValue 'Sorted 'Positive :--> PBool)
-valLacksCS = phoistAcyclic $ plam $ \cs val -> P.do
-  PValue valInner <- pmatch val
-  (plookup # cs # valInner) #== pcon PNothing
+valLacksCS :: ClosedTerm (PCurrencySymbol :--> PValue 'Sorted 'NoGuarantees :--> PBool)
+valLacksCS = phoistAcyclic $ plam $ \cs val -> unTermCont $ do
+  PValue valInner <- pmatchC val
+  pure $ (plookup # cs # valInner) #== pcon PNothing
 
 paysTo :: ClosedTerm (PAddress :--> PTxOut :--> PBool)
-paysTo = phoistAcyclic $ plam $ \addr out -> P.do
-  PTxOut outRec <- pmatch out
-  outAddr <- plet . pfromData $ pfield @"address" # outRec
-  outAddr #== addr
+paysTo = phoistAcyclic $ plam $ \addr out -> unTermCont $ do
+  PTxOut outRec <- pmatchC out
+  outAddr <- pletC . pfromData $ pfield @"address" # outRec
+  pure $ outAddr #== addr
 
 findUnique ::
   (PListLike l, PElemConstraint l a) =>
@@ -267,30 +278,30 @@ findUnique ::
         :--> l a
         :--> a
     )
-findUnique = phoistAcyclic $ plam $ \pred list -> P.do
-  xs <- plet $ pfilter # pred # list
-  pguardM "findUnique: List does not have exactly one matching element" $ (plength # xs) #== 1
-  phead # xs
+findUnique = phoistAcyclic $ plam $ \p list -> unTermCont $ do
+  xs <- pletC $ pfilter # p # list
+  pguardC "findUnique: List does not have exactly one matching element" ((plength # xs) #== 1)
+  pure $ phead # xs
 
 pownCurrencySymbol :: ClosedTerm (PScriptContext :--> PCurrencySymbol)
-pownCurrencySymbol = phoistAcyclic $ plam $ \cxt -> P.do
-  purpose <- pmatch (pfromData $ pfield @"purpose" # cxt)
+pownCurrencySymbol = phoistAcyclic $ plam $ \cxt -> unTermCont $ do
+  purpose <- pmatchC (pfromData $ pfield @"purpose" # cxt)
   case purpose of
-    PMinting csRec -> pfield @"_0" # csRec
-    other -> ptraceError "Purpose is not minting"
+    PMinting csRec -> pure $ pfield @"_0" # csRec
+    _ -> pure $ ptraceError "Purpose is not minting"
 
-txOutDatum :: forall t. (PIsData t, PTryFrom PData t) => ClosedTerm (PTxOut :--> t)
-txOutDatum = phoistAcyclic $ plam $ \txOut -> P.do
-  outDatum <- pmatch $ pfield @"datum" # txOut
+txOutDatum :: forall t. (PTryFrom PData (PAsData t), PIsData t) => ClosedTerm (PTxOut :--> t)
+txOutDatum = phoistAcyclic $ plam $ \txOut -> unTermCont $ do
+  outDatum <- pmatchC $ pfield @"datum" # txOut
   case outDatum of
-    POutputDatum outDatumRec -> P.do
-      PDatum inner <- pmatch $ pfield @"outputDatum" # outDatumRec
-      ptryFrom @t @PData inner fst
-    stupidlinter -> ptraceError "not a set datum"
+    POutputDatum outDatumRec -> do
+      PDatum inner <- pmatchC $ pfield @"outputDatum" # outDatumRec
+      pure $ ptryFromData inner
+    _ -> pure $ ptraceError "not a set datum"
 
 -- extractDatumSuchThat where you don't care about the suchThat
-extractDatum :: forall t. (PIsData t, PTryFrom PData t) => ClosedTerm (PAddress :--> PCurrencySymbol :--> PBuiltinList PTxOut :--> t)
-extractDatum = extractDatumSuchThat #$ plam (\x -> pcon PTrue)
+extractDatum :: forall t. (PTryFrom PData (PAsData t), PIsData t) => ClosedTerm (PAddress :--> PCurrencySymbol :--> PBuiltinList PTxOut :--> t)
+extractDatum = extractDatumSuchThat #$ plam (\_ -> pcon PTrue)
 
 findOutWithCS ::
   (PListLike l, PElemConstraint l PTxOut) =>

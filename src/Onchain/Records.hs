@@ -31,10 +31,10 @@ import Plutarch.Api.V1.Value (pvalueOf)
 import Plutarch.Api.V2 (
   PScriptContext,
  )
+
 import Plutarch.Builtin (PIsData (pdataImpl), pserialiseData)
 import Plutarch.Crypto (pblake2b_256)
 import Plutarch.List (pany, pelem)
-import Plutarch.Monadic qualified as P
 import Plutarch.Prelude (
   ClosedTerm,
   PEq ((#==)),
@@ -44,20 +44,21 @@ import Plutarch.Prelude (
   pfromData,
   phoistAcyclic,
   plam,
-  plet,
-  pletFields,
   pmap,
-  pmatch,
   (#),
   (#$),
   (:-->),
  )
+import Plutarch.TermCont
 
 import Onchain.Utils (
   findUnique,
   hasCS,
   paysTo,
-  pguardM,
+  pguardC,
+  pletC,
+  pletFieldsC,
+  pmatchC,
   pscriptHashAddress,
   resolved,
   scriptHashToCS,
@@ -65,27 +66,16 @@ import Onchain.Utils (
   txOutValue,
  )
 
-{-
-data RecordDatum = RecordDatum
-    { class :: Word16
-    , name  :: ByteString
-    , reference :: Maybe ByteString
-        -- ^ an Arweave address
-    , owner :: PubKeyHash
-}
-
--}
-
 mkRecordValidator :: ClosedTerm (PCurrencySymbol :--> RecordDatum :--> PUnit :--> PScriptContext :--> PUnit)
-mkRecordValidator = phoistAcyclic $ plam $ \protocolCS recordDatum _ cxt -> P.do
-  txInfo <- plet $ pfield @"txInfo" # cxt
+mkRecordValidator = phoistAcyclic $ plam $ \protocolCS recordDatum _ cxt -> unTermCont $ do
+  txInfo <- pletC $ pfield @"txInfo" # cxt
 
-  fields <- pletFields @'["referenceInputs", "outputs", "mint", "inputs", "signatories"] txInfo
+  fields <- pletFieldsC @'["referenceInputs", "outputs", "mint", "inputs", "signatories"] txInfo
 
-  referenceInputsResolved <- plet $ pmap # resolved # pfromData fields.referenceInputs
+  referenceInputsResolved <- pletC $ pmap # resolved # pfromData fields.referenceInputs
 
-  Protocol elemIdMP setElemMP setValidator recordsValidator <-
-    pmatch $
+  Protocol elemIdMP _ _ recordsValidator <-
+    pmatchC $
       txOutDatum @Protocol
         #$ findUnique
         # (hasCS # protocolCS)
@@ -93,37 +83,37 @@ mkRecordValidator = phoistAcyclic $ plam $ \protocolCS recordDatum _ cxt -> P.do
 
   -- INPUTS: UTxO w/ ElemID Token
 
-  elemIdCS <- plet $ scriptHashToCS # pfromData elemIdMP
+  elemIdCS <- pletC $ scriptHashToCS # pfromData elemIdMP
 
-  RecordDatum dClass dName dRef dOwner <- pmatch recordDatum
+  RecordDatum dClass dName _ dOwner <- pmatchC recordDatum
 
-  densKey <- plet . pcon $ DensKey dName dClass
+  densKey <- pletC . pcon $ DensKey dName dClass
 
-  recTokName <- plet $ pcon $ PTokenName (pblake2b_256 #$ pserialiseData # pdataImpl densKey)
+  recTokName <- pletC $ pcon $ PTokenName (pblake2b_256 #$ pserialiseData # pdataImpl densKey)
 
-  inputsResolved <- plet $ pmap # resolved # pfromData fields.inputs
+  inputsResolved <- pletC $ pmap # resolved # pfromData fields.inputs
 
-  authTokenInInputs <- plet $ pany # plam (\x -> pvalueOf # (txOutValue # x) # elemIdCS # recTokName #== 1) # inputsResolved
+  authTokenInInputs <- pletC $ pany # plam (\x -> pvalueOf # (txOutValue # x) # elemIdCS # recTokName #== 1) # inputsResolved
 
-  pguardM "Auth token in inputs" authTokenInInputs
+  pguardC "Auth token in inputs" authTokenInInputs
 
   -- OUTPUTS: RecordDatum paid to RecordsValidator
 
-  outs <- plet $ pfromData fields.outputs
+  outs <- pletC $ pfromData fields.outputs
 
-  recValidatorAddr <- plet $ pscriptHashAddress # recordsValidator
+  recValidatorAddr <- pletC $ pscriptHashAddress # recordsValidator
 
   -- REVIEW: I'm assuming that there's only ever one output paid to the record validator. Not 100% sure that this should always be the case?
   --         If not, we need to find some other way to identify the TxOut that's supposed to contain the datum
   --         (`PTryFrom` doesn't give us a `PMaybe` wrapped result, but just crashes, so we can't just try to convert arbitrary
   --          datums in the outputs to find the "right" one)
-  outRecDatum <- plet $ txOutDatum @RecordDatum #$ findUnique # (paysTo # recValidatorAddr) # outs
+  outRecDatum <- pletC $ txOutDatum @RecordDatum #$ findUnique # (paysTo # recValidatorAddr) # outs
 
-  pguardM "Output record datum == input record datum" $ outRecDatum #== recordDatum
+  pguardC "Output record datum == input record datum" $ outRecDatum #== recordDatum
 
   -- SIGNATURES: Tx is signed by owner
-  pguardM "Signed by owner" $ pelem # dOwner # fields.signatories
+  pguardC "Signed by owner" $ pelem # dOwner # fields.signatories
 
   -- REVIEW: Do we need a check that nothing gets minted? Doesn't seem to matter.
 
-  pcon PUnit
+  pure $ pcon PUnit

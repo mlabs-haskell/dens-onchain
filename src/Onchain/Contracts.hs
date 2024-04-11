@@ -9,6 +9,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE Strict #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -16,17 +17,18 @@
 
 module Onchain.Contracts (DeNSScripts (..), mkDeNSScripts) where
 
-import Data.Default (Default (def))
-
 import Onchain.ElemID qualified as ElemID
 import Onchain.PSMTypes (RecordDatum, SetInsert)
 import Onchain.Protocol qualified as Protocol
 import Onchain.Records qualified as Records
 import Onchain.SetElem qualified as SetElem
+import Onchain.Types qualified as T
 import Plutarch (
   ClosedTerm,
+  Config (..),
   PType,
   Term,
+  TracingMode (..),
   pcon,
   phoistAcyclic,
   plam,
@@ -46,55 +48,25 @@ import Plutarch.Prelude (PData, PUnit (..), pconstant)
 import Plutarch.TryFrom (PTryFrom, ptryFrom)
 import Plutus.Model.V2 (TypedPolicy, TypedValidator, mkTypedPolicyPlutarch, mkTypedValidatorPlutarch, scriptCurrencySymbol)
 
-class PTryFromWithoutStupidSubtypeBullshit (b :: PType) where
-  ptryFrom_ :: forall s. Term s PData -> Term s b
-
-instance PTryFromWithoutStupidSubtypeBullshit PUnit where
-  ptryFrom_ _ = pcon PUnit
-
-instance {-# OVERLAPS #-} PTryFrom PData b => PTryFromWithoutStupidSubtypeBullshit b where
-  ptryFrom_ d = ptryFrom d fst
-
-type C x = PTryFromWithoutStupidSubtypeBullshit x
-
-plutarchValidator ::
-  forall (a :: PType) (b :: PType) (c :: PType).
-  (C a, C b) =>
-  ClosedTerm (a :--> b :--> PScriptContext :--> c) ->
-  ClosedTerm PValidator
-plutarchValidator v = phoistAcyclic $ plam $ \aData bData cxt ->
-  popaque $ v # ptryFrom_ aData # ptryFrom_ bData # cxt
-
-plutarchMintingPolicy ::
-  forall (a :: PType) (c :: PType).
-  C a =>
-  ClosedTerm (a :--> PScriptContext :--> c) ->
-  ClosedTerm PMintingPolicy
-plutarchMintingPolicy v = phoistAcyclic $ plam $ \aData cxt ->
-  popaque $ v # ptryFrom_ aData # cxt
-
 mkSetValidator :: CurrencySymbol -> ClosedTerm PValidator
-mkSetValidator pcs = plutarchValidator $ SetElem.mkSetValidator # pconstant pcs
+mkSetValidator pcs = phoistAcyclic $ plam $ \_ sInsert cxt ->
+  popaque $ SetElem.mkSetValidator # pconstant pcs # pcon PUnit # T.ptryFromData @T.SetInsert sInsert # cxt
 
 mkSetElemMintingPolicy :: CurrencySymbol -> ClosedTerm PMintingPolicy
-mkSetElemMintingPolicy pcs =
-  plutarchMintingPolicy $
-    SetElem.mkSetElemMintingPolicy # pconstant pcs
+mkSetElemMintingPolicy pcs = phoistAcyclic $ plam $ \sInsert cxt ->
+  popaque $ SetElem.mkSetElemMintingPolicy # pconstant pcs # T.ptryFromData sInsert # cxt
 
 mkElemIDMintingPolicy :: CurrencySymbol -> ClosedTerm PMintingPolicy
-mkElemIDMintingPolicy pcs =
-  plutarchMintingPolicy $
-    ElemID.mkElemIDMintingPolicy # pconstant pcs
+mkElemIDMintingPolicy pcs = phoistAcyclic $ plam $ \_ cxt ->
+  popaque $ ElemID.mkElemIDMintingPolicy # pconstant pcs # pcon PUnit # cxt
 
 mkProtocolMintingPolicy :: TxOutRef -> ClosedTerm PMintingPolicy
-mkProtocolMintingPolicy outref =
-  plutarchMintingPolicy $
-    Protocol.mkProtocolMintingPolicy # pconstant outref
+mkProtocolMintingPolicy outref = phoistAcyclic $ plam $ \_ cxt ->
+  popaque $ Protocol.mkProtocolMintingPolicy # pconstant outref # pcon PUnit # cxt
 
 mkRecordValidator :: CurrencySymbol -> ClosedTerm PValidator
-mkRecordValidator pcs =
-  plutarchValidator $
-    Records.mkRecordValidator # pconstant pcs
+mkRecordValidator pcs = phoistAcyclic $ plam $ \recDatum _ cxt ->
+  popaque $ Records.mkRecordValidator # pconstant pcs # T.ptryFromData recDatum # pcon PUnit # cxt
 
 data DeNSScripts = DeNSScripts
   { setValidator :: TypedValidator () SetInsert
@@ -103,6 +75,9 @@ data DeNSScripts = DeNSScripts
   , elemIDMintingPolicy :: TypedPolicy ()
   , protocolMintingPolicy :: TypedPolicy ()
   }
+
+myConfig :: Config
+myConfig = Config DoTracing
 
 mkDeNSScripts :: TxOutRef -> DeNSScripts
 mkDeNSScripts outRef =
@@ -120,10 +95,10 @@ mkDeNSScripts outRef =
       Right res -> res
 
     makeV :: forall d r. ClosedTerm PValidator -> TypedValidator d r
-    makeV v = unsafeFromRight $ mkTypedValidatorPlutarch @d @r def v
+    makeV v = unsafeFromRight $ mkTypedValidatorPlutarch @d @r myConfig v
 
     makeP :: forall t. ClosedTerm PMintingPolicy -> TypedPolicy t
-    makeP p = unsafeFromRight $ mkTypedPolicyPlutarch @t def p
+    makeP p = unsafeFromRight $ mkTypedPolicyPlutarch @t myConfig p
 
     protocolMintingPolicy' = makeP $ mkProtocolMintingPolicy outRef
     protocolCS = scriptCurrencySymbol $ protocolMintingPolicy'

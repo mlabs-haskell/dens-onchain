@@ -3,60 +3,87 @@
 
 module Onchain.PSMTypes where
 
-import PlutusCore.Data (Data (..))
-import PlutusLedgerApi.V2 (CurrencySymbol, PubKeyHash)
-import PlutusTx.Builtins.Internal (BuiltinData (..))
-import PlutusTx.IsData
-import PlutusTx.Prelude
+import PlutusLedgerApi.V2 (BuiltinData (BuiltinData), CurrencySymbol, Data (List), PubKeyHash, ScriptHash)
 
-data DensKey = DensKey BuiltinByteString Integer
+import PlutusTx.IsData (
+  FromData (..),
+  ToData (..),
+  fromData,
+  toData,
+ )
+import PlutusTx.Prelude (
+  Applicative ((<*>)),
+  BuiltinByteString,
+  Integer,
+  Maybe (Nothing),
+  ($),
+  (<$>),
+ )
+import Prelude (Show)
+
+data DensKey = DensKey BuiltinByteString Integer deriving (Show)
 
 data DensValue = DensValue (Maybe BuiltinByteString)
 
 data RecordDatum = RecordDatum Integer BuiltinByteString DensValue PubKeyHash
 
-data SetDatum = SetDatum DensKey DensKey CurrencySymbol
+data SetDatum = SetDatum DensKey DensKey CurrencySymbol deriving (Show)
 
 data SetInsert = SetInsert'Insert DensKey
 
+data ProtocolDatum = ProtocolDatum
+  { pdElemIDMP :: ScriptHash
+  , pdSetElemMP :: ScriptHash
+  , pdSetVal :: ScriptHash
+  , pdRecVal :: ScriptHash
+  }
+
+instance ToData ProtocolDatum where
+  toBuiltinData (ProtocolDatum a b c d) = BuiltinData $ List [toData a, toData b, toData c, toData d]
+
+instance FromData ProtocolDatum where
+  fromBuiltinData (BuiltinData dInner) = case dInner of
+    List [a, b, c, d] -> ProtocolDatum <$> fromData a <*> fromData b <*> fromData c <*> fromData d
+    _ -> Nothing
+
 instance ToData DensKey where
-  toBuiltinData (DensKey bs i) = BuiltinData $ Constr 0 [toData bs, toData i]
+  toBuiltinData (DensKey bs i) = BuiltinData $ List [toData bs, toData i]
 
 instance FromData DensKey where
   fromBuiltinData (BuiltinData dInner) = case dInner of
-    Constr 0 [bs, i] -> DensKey <$> fromData bs <*> fromData i
+    List [bs, i] -> DensKey <$> fromData bs <*> fromData i
     _ -> Nothing
 
 instance ToData DensValue where
-  toBuiltinData (DensValue mbs) = BuiltinData $ Constr 0 [toData mbs]
+  toBuiltinData (DensValue mbs) = BuiltinData $ List [toData mbs]
 
 instance FromData DensValue where
   fromBuiltinData (BuiltinData dInner) = case dInner of
-    Constr 0 [mbs] -> DensValue <$> fromData mbs
+    List [mbs] -> DensValue <$> fromData mbs
     _ -> Nothing
 
 instance ToData RecordDatum where
   toBuiltinData (RecordDatum i bs dval pkh) =
-    BuiltinData $ Constr 0 [toData i, toData bs, toData dval, toData pkh]
+    BuiltinData $ List [toData i, toData bs, toData dval, toData pkh]
 
 instance FromData RecordDatum where
   fromBuiltinData (BuiltinData dInner) = case dInner of
-    Constr 0 [i, bs, dval, pkh] ->
+    List [i, bs, dval, pkh] ->
       RecordDatum <$> fromData i <*> fromData bs <*> fromData dval <*> fromData pkh
     _ -> Nothing
 
 instance ToData SetDatum where
-  toBuiltinData (SetDatum k1 k2 cs) = BuiltinData $ Constr 0 [toData k1, toData k2, toData cs]
+  toBuiltinData (SetDatum k1 k2 cs) = BuiltinData $ List [toData k1, toData k2, toData cs]
 
 instance FromData SetDatum where
   fromBuiltinData (BuiltinData dInner) = case dInner of
-    Constr 0 [k1, k2, cs] -> SetDatum <$> fromData k1 <*> fromData k2 <*> fromData cs
+    List [k1, k2, cs] -> SetDatum <$> fromData k1 <*> fromData k2 <*> fromData cs
     _ -> Nothing
 
 instance ToData SetInsert where
-  toBuiltinData (SetInsert'Insert dKey) = BuiltinData $ Constr 0 [toData dKey]
+  toBuiltinData (SetInsert'Insert dKey) = BuiltinData $ List [toData dKey]
 
 instance FromData SetInsert where
   fromBuiltinData (BuiltinData dInner) = case dInner of
-    Constr 0 [dKey] -> SetInsert'Insert <$> fromData dKey
+    List [dKey] -> SetInsert'Insert <$> fromData dKey
     _ -> Nothing
