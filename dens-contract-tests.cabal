@@ -68,6 +68,13 @@ executable dens-contract-tests
   build-depends:
     , base
     , dens-contract-tests
+    , plutarch
+    , plutus-core
+    , plutus-ledger-api
+    , plutus-simple-model
+    , plutus-tx
+    , pretty-simple
+    , ply-plutarch
 
   hs-source-dirs:   app
   default-language: Haskell2010
