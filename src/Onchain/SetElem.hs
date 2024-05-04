@@ -133,15 +133,16 @@ mkSetValidator ::
         :--> PUnit
     )
 mkSetValidator = phoistAcyclic $ plam $ \protocolCS _ _ cxt -> unTermCont $ do
+  ptraceC "mkSetValidator a"
   -- We only need to check whether the setElem token is minted, all the real validation logic is in that MP
   txInfo <- pletC $ pfield @"txInfo" # cxt
-
+  ptraceC "mkSetValidator b"
   fields <- pletFieldsC @'["referenceInputs", "outputs", "mint"] txInfo
-
+  ptraceC "mkSetValidator c"
   resolvedOutputs <- pletC $ pfromData fields.outputs
-
+  ptraceC "mkSetValidator d"
   resolvedRefInputs <- pletC $ pmap # resolved # pfromData fields.referenceInputs
-
+  ptraceC "mkSetValidator e"
   -- NOTE/FIXME/TODO: I am NOT 100% sure that this is safe, but I do not know another way to get the setElemID
   --                  Someone needs to carefully review. It *seems* safe if the protocol NFT MP is a one shot policy
   Protocol _ setElemMP _ _ <- pmatchC . unTermCont $ do
@@ -155,10 +156,11 @@ mkSetValidator = phoistAcyclic $ plam $ \protocolCS _ _ cxt -> unTermCont $ do
             # protocolCS
             # resolvedRefInputs
       PJust outRef -> pure $ txOutDatum @Protocol # outRef
-
+  ptraceC "mkSetValidator f"
   setElemIdCS <- pletC $ scriptHashToCS # pfromData setElemMP
-
+  ptraceC "mkSetValidator g"
   pguardC "SetElemID token minted" ((pvalueOf # fields.mint # setElemIdCS # emptyTN) #== 1)
+  ptraceC "mkSetValidator h"
   pure $ pcon PUnit
 
 mkSetElemMintingPolicy ::
@@ -190,23 +192,27 @@ mkSetElemMintingPolicy = phoistAcyclic $ plam $ \protocolSymb setInsert cxt -> u
       pif
         isInitalization
         ( unTermCont $ do
+            ptraceC "setElemN"
             -- Checks for an initialize transaction. We already know a SetDatum w/ the initialization properties is in an output w/ a SetElem NFT
 
             -- Is the protocol NFT minted in this TX? NOTE: Protocol MP must be one shot!
             pguardC "Protocol NFT Minted" (pvalueOf # mint # protocolSymb # emptyTN #== 1)
-
+            ptraceC "setElemO"
             -- Is there a protocol datum in the output that contains the protocol NFT? (also we need the fields here)
             Protocol elemIdMP setElemMP _ _ <- pmatchC $ findProtocolInOutputs # protocolSymb # outputs
-
+            ptraceC "setElemP"
             -- Probably redundant, but it can't hurt to make sure that this minting policy is the one indicated in the Protocol datum
             pguardC "Own CS doesn't match protocol SetElem CS" $ (scriptHashToCS # pfromData setElemMP) #== setElemCS
-
-            -- Are no element id tokens minted? (We check the output and mints for redundancy, maybe not necessary)
+            ptraceC "setElemQ"
+             -- Are no element id tokens minted? (We check the output and mints for redundancy, maybe not necessary)
             elemIdCS <- pletC $ scriptHashToCS # pfromData elemIdMP
+            ptraceC "setElemR"
             noElemIDInOutputs <- pletC $ pall # (lacksCS # elemIdCS) # outputs
+            ptraceC "setElemS"
             noElemIDInMint <- pletC $ valLacksCS # elemIdCS # mint
+            ptraceC "setElemT"
             pguardC "No ElemID NFT minted or in output" $ noElemIDInMint #&& noElemIDInOutputs
-
+            ptraceC "setElemU"
             pure $ pcon PUnit
         )
         ( unTermCont $ do
