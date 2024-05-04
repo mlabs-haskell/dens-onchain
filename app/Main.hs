@@ -56,8 +56,8 @@ mkProtocolMintingPolicy = phoistAcyclic $ plam $ \outref _ cxt ->
 main :: IO ()
 main = do
   let cfg = Config DoTracing
-  writeTypedScript cfg "mkSetValidator" "./scripts/mkSetValidator.plutus" mkSetValidator
-  writeTypedScript cfg "mkRecordValidator" "./scripts/mkRecordValidator.plutus" mkRecordValidator
-  writeTypedScript cfg "mkSetElemMintingPolicy" "./scripts/mkSetElemMintingPolicy.plutus" mkSetElemMintingPolicy
-  writeTypedScript cfg "mkElemIDMintingPolicy" "./scripts/mkElemIDMintingPolicy.plutus" mkElemIDMintingPolicy
-  writeTypedScript cfg "mkProtocolMintingPolicy" "./scripts/mkProtocolMintingPolicy" mkProtocolMintingPolicy
+  writeTypedScript cfg "mkSetValidator" "./scripts/mkSetValidator.json" mkSetValidator
+  writeTypedScript cfg "mkRecordValidator" "./scripts/mkRecordValidator.json" mkRecordValidator
+  writeTypedScript cfg "mkSetElemMintingPolicy" "./scripts/mkSetElemMintingPolicy.json" mkSetElemMintingPolicy
+  writeTypedScript cfg "mkElemIDMintingPolicy" "./scripts/mkElemIDMintingPolicy.json" mkElemIDMintingPolicy
+  writeTypedScript cfg "mkProtocolMintingPolicy" "./scripts/mkProtocolMintingPolicy.json" mkProtocolMintingPolicy
