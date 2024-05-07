@@ -21,7 +21,7 @@ module Main where
 import Plutarch
 import Plutarch.Api.V2
 import Ply.Plutarch
-import Plutarch.Prelude (PData, PUnit (..), pconstant)
+import Plutarch.Prelude (PData, PUnit (..), pconstant, PAsData)
 
 
 import Onchain.Protocol qualified as Protocol
@@ -29,28 +29,29 @@ import Onchain.Records qualified as Records
 import Onchain.SetElem qualified as SetElem
 import Onchain.ElemID qualified as ElemID
 import Onchain.Types qualified as T
+import Plutarch.TryFrom (ptryFrom)
 
 
 
-mkSetValidator :: ClosedTerm (PCurrencySymbol :--> PValidator)
+mkSetValidator :: ClosedTerm (PData  :--> PValidator)
 mkSetValidator = phoistAcyclic $ plam $ \pcs _ sInsert cxt ->
-  popaque $ SetElem.mkSetValidator # pcs # pcon PUnit # T.ptryFromData @T.SetInsert sInsert # cxt
+  popaque $ SetElem.mkSetValidator # T.ptryFromData pcs # pcon PUnit # T.ptryFromData @T.SetInsert sInsert # cxt
 
-mkRecordValidator :: ClosedTerm (PCurrencySymbol :--> PValidator)
+mkRecordValidator :: ClosedTerm (PData :--> PValidator)
 mkRecordValidator = phoistAcyclic $ plam $ \pcs recDatum _ cxt ->
-  popaque $ Records.mkRecordValidator # pcs # T.ptryFromData recDatum # pcon PUnit # cxt
+  popaque $ Records.mkRecordValidator # T.ptryFromData pcs # T.ptryFromData recDatum # pcon PUnit # cxt
 
-mkSetElemMintingPolicy :: ClosedTerm (PCurrencySymbol :--> PMintingPolicy)
+mkSetElemMintingPolicy :: ClosedTerm (PData :--> PMintingPolicy)
 mkSetElemMintingPolicy = phoistAcyclic $ plam $ \pcs sInsert cxt ->
-  popaque $ SetElem.mkSetElemMintingPolicy # pcs # T.ptryFromData sInsert # cxt
+  popaque $ SetElem.mkSetElemMintingPolicy # T.ptryFromData pcs # T.ptryFromData sInsert # cxt
 
-mkElemIDMintingPolicy :: ClosedTerm (PCurrencySymbol :--> PMintingPolicy)
+mkElemIDMintingPolicy :: ClosedTerm (PData  :--> PMintingPolicy)
 mkElemIDMintingPolicy = phoistAcyclic $ plam $ \pcs _ cxt ->
-  popaque $ ElemID.mkElemIDMintingPolicy # pcs # pcon PUnit # cxt
+  popaque $ ElemID.mkElemIDMintingPolicy # T.ptryFromData pcs # pcon PUnit # cxt
 
-mkProtocolMintingPolicy :: ClosedTerm (PTxOutRef :--> PMintingPolicy)
+mkProtocolMintingPolicy :: ClosedTerm (PData :--> PMintingPolicy)
 mkProtocolMintingPolicy = phoistAcyclic $ plam $ \outref _ cxt ->
-  popaque $ Protocol.mkProtocolMintingPolicy # outref # pcon PUnit # cxt
+  popaque $ Protocol.mkProtocolMintingPolicy # T.ptryFromData outref # pcon PUnit # cxt
 
 
 main :: IO ()

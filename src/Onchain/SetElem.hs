@@ -236,28 +236,33 @@ mkSetElemMintingPolicy = phoistAcyclic $ plam $ \protocolSymb setInsert cxt -> u
             setDatum <- pletC $ extractDatum @SetDatum # setValidatorAddress # setElemCS #$ resolvedInputs -- ignoring OwnerApproval for now
             ptraceC "setElemM"
             SetDatum l r _ <- pmatchC setDatum
+            ptraceC "setElemM.2"
             pguardC "Validate set insert" $ validateSetInsert # setDatum # pfromData keyToInsert
+            ptraceC "setElemU"
 
             -- 2) OUTPUTS: Check for a. SD(k, densKey) b. SD(densKey,nxt)
 
             l' <- pletC $ pfromData l
             r' <- pletC $ pfromData r
             k <- pletC $ pfromData keyToInsert
+            ptraceC "setElemV"
             checkOutput <- pletC $ plam $ \p -> extractDatumSuchThat @SetDatum # p # setValidatorAddress # setElemCS # outputs
+            ptraceC "setElemW"
             SetDatum {} <- pmatchC $ checkOutput # (hasLR # l' # k)
             SetDatum {} <- pmatchC $ checkOutput # (hasLR # k # r')
-
+            ptraceC "setElemX"
             -- 3) MINTS: Check for the presence of a SetElemID NFT & ElementID NFT
 
             -- This, plus the two subsequent checks, implies that *only* the SetElem and ElemID tokens are minted
             pguardC "Only two CS minted " $ totalMint # mint #== 2
 
             checkMintsOne <- pletC $ plam $ \currSym tokName -> mintsExactly # 1 # currSym # tokName # mint
-
+            ptraceC "setElemY"
             pguardC "Mints one SetElemID token" $ checkMintsOne # setElemCS # emptyTN
 
             elemIdCS <- pletC $ scriptHashToCS # pfromData elemIdMP
             kTokName <- pletC $ pcon $ PTokenName (pblake2b_256 #$ pserialiseData # pdataImpl k)
+            ptraceC "setElemZ"
             pguardC "Mints one ElementID NFT with a token name == blake2b_256(densKey)" $ checkMintsOne # elemIdCS # kTokName
 
             pure $ pcon PUnit
