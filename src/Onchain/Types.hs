@@ -28,7 +28,7 @@ module Onchain.Types (
 ) where
 
 import qualified GHC.Generics
-import Plutarch.Internal (Term, pdelay, pforce)
+import Plutarch.Internal (Term, pdelay, pforce, punsafeCoerce)
 
 import qualified Plutarch
 import Plutarch.Api.V2 (
@@ -61,6 +61,8 @@ import Plutarch.Prelude (
   ptraceError,
   ptryFrom,
  )
+import Unsafe.Coerce (unsafeCoerce)
+import Data.Function
 
 ptryFromData :: forall x s. (PTryFrom PData (PAsData x), PIsData x) => Term s PData -> Term s x
 ptryFromData t = pfromData $ ptryFrom @(PAsData x) t fst
@@ -207,7 +209,10 @@ instance PTryFrom PData (PAsData SetInsert)
 
 instance PlutusType SetInsert where
   type PInner SetInsert = PBuiltinList PData
-  pcon' (SetInsert'Insert a) = cons a nil
-  pmatch' xs f = pforce $ pmatch xs $ \case
-    PCons a _ -> pdelay $ f $ SetInsert'Insert (ptryFrom a fst)
-    _ -> pdelay $ ptraceError "Pmatch SetInsert fail"
+  pcon' (SetInsert'Insert x) = pmatch (pfromData x) $ \case
+    DensKey t1 t2 -> pcon $ PCons (pforgetData t1) $ pcon $ PCons (pforgetData t2) $ pcon PNil
+  pmatch' xs f = pforce $ pmatch xs \case
+    PCons bs rest -> pmatch rest \case
+      PCons i _ -> pdelay $ f $ SetInsert'Insert $ pdata $ pcon $ DensKey (ptryFrom bs fst) (ptryFrom i fst)
+      _ -> pdelay $ ptraceError "PMatch DensKey Fail"
+    _ -> pdelay $ ptraceError "PMatch DensKey Fail"
